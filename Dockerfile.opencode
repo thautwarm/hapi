@@ -1,0 +1,46 @@
+ARG TOOLS_IMAGE=node:22-bookworm
+ARG RUNTIME_IMAGE=hypercube/fe04-agent-env:latest
+
+FROM ${TOOLS_IMAGE} AS builder
+WORKDIR /app
+
+RUN npm install -g bun@1.3.14 opencode-ai
+
+COPY package.json bun.lock ./
+COPY cli/package.json ./cli/package.json
+COPY hub/package.json ./hub/package.json
+COPY shared/package.json ./shared/package.json
+COPY web/package.json ./web/package.json
+COPY website/package.json ./website/package.json
+COPY docs/package.json ./docs/package.json
+
+RUN bun install
+
+COPY . .
+
+RUN bun run build:web
+
+FROM ${RUNTIME_IMAGE}
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HAPI_HOME=/data/hapi \
+    HAPI_LISTEN_HOST=0.0.0.0 \
+    HAPI_LISTEN_PORT=13314 \
+    HAPI_RUNNER_WORKSPACE_ROOTS=/workspace \
+    CORS_ORIGINS=*
+
+WORKDIR /app/cli
+
+COPY --from=builder /usr/local/lib/node_modules/bun /usr/local/lib/node_modules/bun
+COPY --from=builder /usr/local/lib/node_modules/opencode-ai /usr/local/lib/node_modules/opencode-ai
+RUN ln -sf /usr/local/lib/node_modules/bun/bin/bun.exe /usr/local/bin/bun \
+    && ln -sf /usr/local/lib/node_modules/opencode-ai/bin/opencode.exe /usr/local/bin/opencode
+
+COPY --from=builder /app /app
+COPY docker/opencode-entrypoint.sh /usr/local/bin/hapi-opencode-entrypoint
+RUN chmod +x /usr/local/bin/hapi-opencode-entrypoint
+
+EXPOSE 13314
+VOLUME ["/data/hapi", "/workspace"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hapi-opencode-entrypoint"]

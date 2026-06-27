@@ -8,11 +8,23 @@
  */
 
 import { isKnownFlavor, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
-import type { CursorMigrateOutcome, CursorMigrateToAcpRequest, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type {
+    CursorMigrateOutcome,
+    CursorMigrateToAcpRequest,
+    RunnerImportableSessionsRequest,
+    RunnerImportableSessionsResponse,
+    RunnerImportedSessionMessage,
+    RunnerImportedSessionPage,
+    RunnerImportedSessionPayload,
+    RunnerImportSessionResult,
+    RunnerImportSessionsRequest,
+    RunnerImportSessionsResponse,
+    SlashCommandsResponse
+} from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
-import type { Store, CancelQueuedMessageResult } from '../store'
+import type { Store, CancelQueuedMessageResult, StoredMessage } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 import type { SSEManager } from '../sse/sseManager'
@@ -125,6 +137,107 @@ function extractClaudeUserMessageTextFromAgentOutput(content: unknown): string |
     if (message?.role !== 'user') return undefined
 
     return extractUserMessageText(message.content)
+}
+
+function runnerImportAgentSessionField(flavor: RunnerImportedSessionPayload['flavor']): 'claudeSessionId' | 'codexSessionId' | 'opencodeSessionId' {
+    switch (flavor) {
+        case 'claude':
+            return 'claudeSessionId'
+        case 'codex':
+            return 'codexSessionId'
+        case 'opencode':
+            return 'opencodeSessionId'
+    }
+}
+
+function extractImportSourceKey(content: unknown): string | null {
+    const roleWrapped = unwrapRoleWrappedRecordEnvelope(content)
+    const meta = asRecord(roleWrapped?.meta)
+    const key = meta?.importSourceKey
+    return typeof key === 'string' && key.length > 0 ? key : null
+}
+
+function normalizeImportComparable(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map(normalizeImportComparable)
+    }
+
+    const record = asRecord(value)
+    if (!record) return value
+
+    const normalized: Record<string, unknown> = {}
+    for (const key of Object.keys(record).sort()) {
+        if (key === 'importSourceKey') continue
+        normalized[key] = normalizeImportComparable(record[key])
+    }
+    return normalized
+}
+
+function importComparableKey(content: unknown): string {
+    try {
+        return JSON.stringify(normalizeImportComparable(content))
+    } catch {
+        return String(content)
+    }
+}
+
+function withRunnerImportMeta(message: RunnerImportedSessionMessage): { role: 'user' | 'agent'; content: unknown; meta: Record<string, unknown> } {
+    return {
+        role: message.message.role,
+        content: message.message.content,
+        meta: {
+            ...(message.message.meta ?? {}),
+            sentFrom: message.message.meta?.sentFrom ?? 'cli',
+            importSourceKey: message.sourceKey
+        }
+    }
+}
+
+function buildRunnerImportedSessionMetadata(
+    machine: Machine,
+    payload: RunnerImportedSessionPayload,
+    existing?: Session
+): Record<string, unknown> {
+    const now = Date.now()
+    const agentSessionField = runnerImportAgentSessionField(payload.flavor)
+    const metadata: Record<string, unknown> = {
+        ...(existing?.metadata ?? {}),
+        path: payload.cwd ?? existing?.metadata?.path ?? '',
+        host: machine.metadata?.host ?? existing?.metadata?.host ?? 'runner',
+        os: machine.metadata?.platform ?? existing?.metadata?.os,
+        version: machine.metadata?.happyCliVersion ?? existing?.metadata?.version,
+        machineId: machine.id,
+        flavor: payload.flavor,
+        lifecycleState: existing?.metadata?.lifecycleState ?? 'imported',
+        lifecycleStateSince: existing?.metadata?.lifecycleStateSince ?? now,
+        name: existing?.metadata?.name ?? payload.title,
+        summary: payload.lastUserMessage
+            ? { text: payload.lastUserMessage, updatedAt: payload.modifiedAt || now }
+            : existing?.metadata?.summary,
+        [agentSessionField]: payload.id
+    }
+
+    for (const key of Object.keys(metadata)) {
+        if (metadata[key] === undefined) {
+            delete metadata[key]
+        }
+    }
+    return metadata
+}
+
+
+function mergeRunnerImportSessionResults(
+    current: RunnerImportSessionResult,
+    next: RunnerImportSessionResult
+): RunnerImportSessionResult {
+    return {
+        agentSessionId: next.agentSessionId || current.agentSessionId,
+        hapiSessionId: next.hapiSessionId ?? current.hapiSessionId,
+        created: current.created === true || next.created === true ? true : undefined,
+        appendedMessages: (current.appendedMessages ?? 0) + (next.appendedMessages ?? 0),
+        skippedMessages: (current.skippedMessages ?? 0) + (next.skippedMessages ?? 0),
+        error: next.error ?? current.error
+    }
 }
 
 export class SyncEngine {
@@ -1531,6 +1644,220 @@ export class SyncEngine {
 
     async listMachineDirectory(machineId: string, path: string): Promise<RpcListDirectoryResponse> {
         return await this.rpcGateway.listMachineDirectory(machineId, path)
+    }
+
+    async listImportableAgentSessions(
+        machineId: string,
+        request: RunnerImportableSessionsRequest
+    ): Promise<RunnerImportableSessionsResponse> {
+        return await this.rpcGateway.listImportableAgentSessions(machineId, request)
+    }
+
+    async importRunnerAgentSessions(
+        machineId: string,
+        namespace: string,
+        request: RunnerImportSessionsRequest
+    ): Promise<RunnerImportSessionsResponse> {
+        const machine = this.getMachineByNamespace(machineId, namespace)
+        if (!machine) {
+            return { success: false, error: 'Machine not found' }
+        }
+
+        const results: RunnerImportSessionResult[] = []
+        for (const sessionId of request.sessionIds) {
+            results.push(await this.importSingleRunnerAgentSession(machineId, machine, namespace, request, sessionId))
+        }
+
+        return {
+            success: true,
+            importedCount: results.filter((result) => result.hapiSessionId && !result.error).length,
+            results
+        }
+    }
+
+    private async importSingleRunnerAgentSession(
+        machineId: string,
+        machine: Machine,
+        namespace: string,
+        request: RunnerImportSessionsRequest,
+        sessionId: string
+    ): Promise<RunnerImportSessionResult> {
+        let cursor: string | undefined
+        let aggregate: RunnerImportSessionResult = { agentSessionId: sessionId }
+        let pages = 0
+        const maxPages = 10_000
+
+        const activeMatch = this.findRunnerImportCandidateSessionsById(namespace, request.flavor, sessionId)
+            .some((session) => session.active)
+        if (activeMatch) {
+            return {
+                agentSessionId: sessionId,
+                error: 'Matching Hapi session is active; stop/archive it before importing history'
+            }
+        }
+
+        while (pages < maxPages) {
+            pages += 1
+            const pageResult = await this.rpcGateway.getImportableAgentSessionPage(machineId, {
+                flavor: request.flavor,
+                sessionId,
+                cursor,
+                limit: request.pageSize
+            })
+            if (!pageResult.success) {
+                return {
+                    ...aggregate,
+                    agentSessionId: sessionId,
+                    error: pageResult.error
+                }
+            }
+
+            const persisted = this.persistRunnerImportedSessionPage(machine, namespace, pageResult.page)
+            aggregate = mergeRunnerImportSessionResults(aggregate, persisted)
+            if (persisted.error) return aggregate
+
+            cursor = pageResult.page.nextCursor ?? undefined
+            if (pageResult.page.done || !cursor) return aggregate
+        }
+
+        return {
+            ...aggregate,
+            agentSessionId: sessionId,
+            error: 'Runner import exceeded the maximum page count; refresh and retry'
+        }
+    }
+
+    private findRunnerImportCandidateSessionsById(
+        namespace: string,
+        flavor: RunnerImportedSessionPayload['flavor'],
+        agentSessionId: string
+    ): Session[] {
+        const agentSessionField = runnerImportAgentSessionField(flavor)
+        return this.getSessionsByNamespace(namespace)
+            .filter((session) => {
+                const metadata = session.metadata
+                if (!metadata) return false
+                if (metadata.flavor !== flavor) return false
+                return (metadata as unknown as Record<string, unknown>)[agentSessionField] === agentSessionId
+            })
+    }
+
+    private findRunnerImportCandidateSessions(namespace: string, payload: RunnerImportedSessionPayload): Session[] {
+        return this.findRunnerImportCandidateSessionsById(namespace, payload.flavor, payload.id)
+    }
+
+    private findRunnerImportTargetSession(namespace: string, payload: RunnerImportedSessionPayload): Session | undefined {
+        return this.findRunnerImportCandidateSessions(namespace, payload)
+            .filter((session) => !session.active)
+            .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    }
+
+    private persistRunnerImportedSessionPage(
+        machine: Machine,
+        namespace: string,
+        payload: RunnerImportedSessionPage
+    ): RunnerImportSessionResult {
+        try {
+            const candidates = this.findRunnerImportCandidateSessions(namespace, payload)
+            const existing = this.findRunnerImportTargetSession(namespace, payload)
+            if (candidates.some((session) => session.active)) {
+                return {
+                    agentSessionId: payload.id,
+                    error: 'Matching Hapi session is active; stop/archive it before importing history'
+                }
+            }
+
+            const metadata = buildRunnerImportedSessionMetadata(machine, payload, existing)
+            const session = existing ?? this.getOrCreateSession(
+                `runner-import:${machine.id}:${payload.flavor}:${payload.id}`,
+                metadata,
+                null,
+                namespace
+            )
+            const latestSession = this.getSessionByNamespace(session.id, namespace) ?? session
+
+            if (existing) {
+                const nextMetadata = buildRunnerImportedSessionMetadata(machine, payload, latestSession)
+                const currentComparable = importComparableKey(latestSession.metadata ?? {})
+                const nextComparable = importComparableKey(nextMetadata)
+                if (currentComparable !== nextComparable) {
+                    const update = this.store.sessions.updateSessionMetadata(
+                        latestSession.id,
+                        nextMetadata,
+                        latestSession.metadataVersion,
+                        namespace,
+                        { touchUpdatedAt: false }
+                    )
+                    if (update.result === 'success' || update.result === 'version-mismatch') {
+                        this.sessionCache.refreshSession(latestSession.id)
+                    }
+                }
+            }
+
+            const existingMessages = this.store.messages.getAllMessages(latestSession.id)
+            const existingSourceKeys = new Set<string>()
+            for (const message of existingMessages) {
+                const sourceKey = extractImportSourceKey(message.content)
+                if (sourceKey) existingSourceKeys.add(sourceKey)
+            }
+
+            const appendedMessages: StoredMessage[] = []
+            let skippedMessages = 0
+            let latestActivity = Number.isFinite(payload.modifiedAt) ? payload.modifiedAt : Date.now()
+            for (const importedMessage of payload.messages) {
+                if (existingSourceKeys.has(importedMessage.sourceKey)) {
+                    skippedMessages += 1
+                    continue
+                }
+
+                const content = withRunnerImportMeta(importedMessage)
+                const createdAt = Number.isFinite(importedMessage.createdAt)
+                    ? Math.max(0, Math.floor(importedMessage.createdAt ?? Date.now()))
+                    : Date.now()
+                const stored = this.store.messages.copyMessageToSession(latestSession.id, {
+                    content,
+                    createdAt,
+                    localId: null,
+                    invokedAt: createdAt,
+                    scheduledAt: null
+                })
+                appendedMessages.push(stored)
+                existingSourceKeys.add(importedMessage.sourceKey)
+                latestActivity = Math.max(latestActivity, stored.createdAt)
+            }
+
+            for (const message of appendedMessages) {
+                this.handleRealtimeEvent({
+                    type: 'message-received',
+                    sessionId: latestSession.id,
+                    message: {
+                        id: message.id,
+                        seq: message.seq,
+                        localId: message.localId ?? null,
+                        content: message.content,
+                        createdAt: message.createdAt,
+                        invokedAt: message.invokedAt,
+                        scheduledAt: message.scheduledAt
+                    }
+                })
+            }
+
+            this.recordSessionActivity(latestSession.id, latestActivity)
+            this.handleRealtimeEvent({ type: 'session-updated', sessionId: latestSession.id })
+
+            return {
+                agentSessionId: payload.id,
+                hapiSessionId: latestSession.id,
+                created: !existing,
+                appendedMessages: appendedMessages.length,
+                skippedMessages
+            }
+        } catch (error) {
+            return {
+                agentSessionId: payload.id,
+                error: error instanceof Error ? error.message : 'Failed to persist imported session'
+            }
+        }
     }
 
     async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {

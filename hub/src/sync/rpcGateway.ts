@@ -1,5 +1,9 @@
 import type { AgentFlavor, CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import {
+    RunnerImportableSessionsResponseSchema,
+    RunnerImportSessionPageResponseSchema
+} from '@hapi/protocol/apiTypes'
 import type {
     CodexModelSummary,
     CodexModelsResponse,
@@ -15,6 +19,10 @@ import type {
     OpencodeModelSummary,
     OpencodeReasoningEffortResponse,
     PathExistsResponse,
+    RunnerImportableSessionsRequest,
+    RunnerImportableSessionsResponse,
+    RunnerImportSessionPageRequest,
+    RunnerImportSessionPageResponse,
     SlashCommandsResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
@@ -23,6 +31,7 @@ import type { RpcRegistry } from '../socket/rpcRegistry'
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
+const RUNNER_IMPORT_RPC_TIMEOUT_MS = 120_000
 
 /**
  * tiann/hapi#916: thrown by {@link RpcGateway.rpcCall} when the target CLI is
@@ -204,6 +213,54 @@ export class RpcGateway {
             exists[key] = value === true
         }
         return exists
+    }
+
+    async listImportableAgentSessions(
+        machineId: string,
+        request: RunnerImportableSessionsRequest
+    ): Promise<RunnerImportableSessionsResponse> {
+        try {
+            const result = await this.machineRpc(
+                machineId,
+                RPC_METHODS.ListImportableAgentSessions,
+                request,
+                RUNNER_IMPORT_RPC_TIMEOUT_MS
+            )
+            const parsed = RunnerImportableSessionsResponseSchema.safeParse(result)
+            if (!parsed.success) {
+                return { success: false, error: 'Unexpected importable sessions response' }
+            }
+            return parsed.data
+        } catch (error) {
+            if (error instanceof RpcTargetMissingError) {
+                return { success: false, error: 'Runner does not support session import; upgrade or restart the runner' }
+            }
+            throw error
+        }
+    }
+
+    async getImportableAgentSessionPage(
+        machineId: string,
+        request: RunnerImportSessionPageRequest
+    ): Promise<RunnerImportSessionPageResponse> {
+        try {
+            const result = await this.machineRpc(
+                machineId,
+                RPC_METHODS.GetImportableAgentSessionPage,
+                request,
+                RUNNER_IMPORT_RPC_TIMEOUT_MS
+            )
+            const parsed = RunnerImportSessionPageResponseSchema.safeParse(result)
+            if (!parsed.success) {
+                return { success: false, error: 'Unexpected import session page response' }
+            }
+            return parsed.data
+        } catch (error) {
+            if (error instanceof RpcTargetMissingError) {
+                return { success: false, error: 'Runner does not support paged session import; upgrade or restart the runner' }
+            }
+            throw error
+        }
     }
 
     async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {

@@ -8,7 +8,17 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { logger } from '@/ui/logger'
 import { configuration } from '@/configuration'
-import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
+import { RunnerImportableSessionsRequestSchema, RunnerImportSessionPageRequestSchema } from '@hapi/protocol'
+import type {
+    ClientToServerEvents,
+    RunnerImportableSessionsRequest,
+    RunnerImportableSessionsResponse,
+    RunnerImportSessionPageRequest,
+    RunnerImportSessionPageResponse,
+    ServerToClientEvents,
+    Update,
+    UpdateMachineBody
+} from '@hapi/protocol'
 import type { MachineDirectoryEntry, MachineListDirectoryResponse, PathExistsResponse } from '@hapi/protocol/apiTypes'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { RunnerState, Machine, MachineMetadata } from './types'
@@ -30,6 +40,8 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
     stopSession: (sessionId: string) => boolean
     requestShutdown: () => void
+    listImportableAgentSessions: (params: RunnerImportableSessionsRequest) => Promise<RunnerImportableSessionsResponse>
+    getImportableAgentSessionPage: (params: RunnerImportSessionPageRequest) => Promise<RunnerImportSessionPageResponse>
 }
 
 interface PathExistsRequest {
@@ -247,7 +259,7 @@ export class ApiMachineClient {
         }
     }
 
-    setRPCHandlers({ spawnSession, stopSession, requestShutdown }: MachineRpcHandlers): void {
+    setRPCHandlers({ spawnSession, stopSession, requestShutdown, listImportableAgentSessions, getImportableAgentSessionPage }: MachineRpcHandlers): void {
         this.rpcHandlerManager.registerHandler(RPC_METHODS.SpawnHappySession, async (params: any) => {
             const { directory, sessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, token, sessionType, worktreeName } = params || {}
 
@@ -305,6 +317,22 @@ export class ApiMachineClient {
         this.rpcHandlerManager.registerHandler(RPC_METHODS.StopRunner, () => {
             setTimeout(() => requestShutdown(), 100)
             return { message: 'Runner stop request acknowledged' }
+        })
+
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.ListImportableAgentSessions, async (params: any) => {
+            const parsed = RunnerImportableSessionsRequestSchema.safeParse(params ?? {})
+            if (!parsed.success) {
+                return { success: false, error: 'Invalid import session list request' }
+            }
+            return await listImportableAgentSessions(parsed.data)
+        })
+
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.GetImportableAgentSessionPage, async (params: any) => {
+            const parsed = RunnerImportSessionPageRequestSchema.safeParse(params ?? {})
+            if (!parsed.success) {
+                return { success: false, error: 'Invalid import session page request' }
+            }
+            return await getImportableAgentSessionPage(parsed.data)
         })
     }
 

@@ -70,6 +70,17 @@ function extractRawUserTextContent(content: unknown): string | null {
     return parts.length > 0 ? parts.join('\n') : null
 }
 
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isImportedHistoryMessageContent(content: unknown): boolean {
+    const record = isRecord(content) ? content : null
+    const meta = isRecord(record?.meta) ? record.meta : null
+    return typeof meta?.importSourceKey === 'string' && meta.importSourceKey.length > 0
+}
+
 /**
  * Returns true if a JSONL message should be classified as a user-role message
  * (i.e., text typed by a real human) rather than an agent-role message.
@@ -357,6 +368,13 @@ export class ApiSessionClient extends EventEmitter {
 
     private handleIncomingMessage(message: { id?: string; seq?: number; localId?: string | null; content: unknown }): void {
         if (!this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
+            return
+        }
+
+        // Imported transcript history is persisted for the web UI/resume context only.
+        // If an active or stale runner reconnects after a manual import, CLI backfill
+        // must not replay those historical user messages into the agent as fresh input.
+        if (isImportedHistoryMessageContent(message.content)) {
             return
         }
 

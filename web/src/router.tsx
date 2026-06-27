@@ -17,6 +17,7 @@ import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
+import { RunnerSessionImportDialog } from '@/components/RunnerSessionImportDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { NewSession } from '@/components/NewSession'
 import { WorkspaceBrowser } from '@/components/WorkspaceBrowser'
@@ -42,7 +43,7 @@ import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { markSessionSeen } from '@/lib/sessionLastSeen'
 import { clearCodexImportedSession, markCodexSessionsImported } from '@/lib/codexImportedSessions'
-import type { Machine, CodexDuplicateSessionGroup, CodexLocalSessionSummary } from '@/types/api'
+import type { Machine, CodexDuplicateSessionGroup, CodexLocalSessionSummary, RunnerImportableSessionSummary, RunnerImportFlavor, RunnerImportSessionResult } from '@/types/api'
 import FilesPage from '@/routes/sessions/files'
 import FilePage from '@/routes/sessions/file'
 import TerminalPage from '@/routes/sessions/terminal'
@@ -111,6 +112,27 @@ function CodexImportIcon(props: { className?: string }) {
     )
 }
 
+function RunnerImportIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <path d="M12 3v12" />
+            <path d="m7 10 5 5 5-5" />
+            <path d="M5 21h14" />
+        </svg>
+    )
+}
+
 function FolderOpenIcon(props: { className?: string }) {
     return (
         <svg
@@ -154,6 +176,14 @@ function getMachineTitle(machine: Machine): string {
     if (machine.metadata?.displayName) return machine.metadata.displayName
     if (machine.metadata?.host) return machine.metadata.host
     return machine.id.slice(0, 8)
+}
+
+function getMachineSubtitle(machine: Machine): string {
+    const parts = [
+        machine.metadata?.platform,
+        machine.metadata?.happyCliVersion ? `hapi ${machine.metadata.happyCliVersion}` : null
+    ].filter((part): part is string => Boolean(part))
+    return parts.join(' · ') || machine.id
 }
 
 function SessionsPage() {
@@ -484,6 +514,15 @@ function SessionsPage() {
                             </button>
                             <button
                                 type="button"
+                                onClick={() => navigate({ to: '/machines' })}
+                                aria-label={t('runnerImport.nav')}
+                                className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                title={t('runnerImport.nav')}
+                            >
+                                <RunnerImportIcon className="h-5 w-5" />
+                            </button>
+                            <button
+                                type="button"
                                 onClick={() => navigate({ to: '/browse' })}
                                 className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
                                 title={t('browse.nav')}
@@ -576,6 +615,247 @@ function SessionsPage() {
 
 function SessionsIndexPage() {
     return null
+}
+
+function MachinesPage() {
+    const { api } = useAppContext()
+    const navigate = useNavigate()
+    const queryClient = useQueryClient()
+    const { addToast } = useToast()
+    const { t } = useTranslation()
+    const { machines, isLoading, error, refetch } = useMachines(api, true)
+    const [isImportOpen, setIsImportOpen] = useState(false)
+    const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
+    const [selectedFlavor, setSelectedFlavor] = useState<RunnerImportFlavor>('claude')
+    const [runnerImportSessions, setRunnerImportSessions] = useState<RunnerImportableSessionSummary[]>([])
+    const [isLoadingRunnerImportSessions, setIsLoadingRunnerImportSessions] = useState(false)
+    const [isRefreshingRunnerImportSessions, setIsRefreshingRunnerImportSessions] = useState(false)
+    const [isImportingRunnerSessions, setIsImportingRunnerSessions] = useState(false)
+    const [runnerImportFailures, setRunnerImportFailures] = useState<RunnerImportSessionResult[]>([])
+    const [runnerImportRefreshError, setRunnerImportRefreshError] = useState<string | null>(null)
+    const lastRunnerImportLoadRef = useRef<{ machineId: string; flavor: RunnerImportFlavor } | null>(null)
+
+    const loadRunnerImportableSessions = useCallback(async (
+        machineId: string,
+        flavor: RunnerImportFlavor,
+        options: { refresh?: boolean; silent?: boolean } = {}
+    ) => {
+        if (!machineId) return
+        lastRunnerImportLoadRef.current = { machineId, flavor }
+        if (!options.silent) {
+            setIsLoadingRunnerImportSessions(true)
+        }
+        const isCurrentLoad = () => {
+            const current = lastRunnerImportLoadRef.current
+            return current?.machineId === machineId && current.flavor === flavor
+        }
+        try {
+            const result = await api.getRunnerImportableSessions(machineId, flavor, { refresh: options.refresh })
+            if (!result.success) {
+                throw new Error(result.error)
+            }
+            if (!isCurrentLoad()) return
+            setRunnerImportSessions(result.sessions)
+            setIsRefreshingRunnerImportSessions(result.refreshing === true)
+            setRunnerImportRefreshError(result.refreshError ?? null)
+        } catch (error) {
+            if (!isCurrentLoad()) return
+            if (!options.silent) {
+                setRunnerImportSessions([])
+                addToast({
+                    title: t('runnerImport.loadFailed.title'),
+                    body: error instanceof Error ? error.message : t('runnerImport.loadFailed.body'),
+                    sessionId: '',
+                    url: ''
+                })
+            }
+            setIsRefreshingRunnerImportSessions(false)
+        } finally {
+            if (!options.silent && isCurrentLoad()) {
+                setIsLoadingRunnerImportSessions(false)
+            }
+        }
+    }, [addToast, api, t])
+
+    useEffect(() => {
+        if (!isImportOpen || !isRefreshingRunnerImportSessions) return
+        const lastLoad = lastRunnerImportLoadRef.current
+        if (!lastLoad) return
+        const timer = setInterval(() => {
+            void loadRunnerImportableSessions(lastLoad.machineId, lastLoad.flavor, { silent: true })
+        }, 1_000)
+        return () => clearInterval(timer)
+    }, [isImportOpen, isRefreshingRunnerImportSessions, loadRunnerImportableSessions])
+
+    const openRunnerImportDialog = useCallback((machineId: string) => {
+        setSelectedMachineId(machineId)
+        setIsImportOpen(true)
+        setRunnerImportSessions([])
+        setRunnerImportFailures([])
+        setRunnerImportRefreshError(null)
+        setIsRefreshingRunnerImportSessions(false)
+        void loadRunnerImportableSessions(machineId, selectedFlavor)
+    }, [loadRunnerImportableSessions, selectedFlavor])
+
+    const handleMachineChange = useCallback((machineId: string) => {
+        setSelectedMachineId(machineId)
+        setRunnerImportSessions([])
+        setRunnerImportFailures([])
+        setRunnerImportRefreshError(null)
+        setIsRefreshingRunnerImportSessions(false)
+        void loadRunnerImportableSessions(machineId, selectedFlavor)
+    }, [loadRunnerImportableSessions, selectedFlavor])
+
+    const handleFlavorChange = useCallback((flavor: RunnerImportFlavor) => {
+        setSelectedFlavor(flavor)
+        setRunnerImportSessions([])
+        setRunnerImportFailures([])
+        setRunnerImportRefreshError(null)
+        setIsRefreshingRunnerImportSessions(false)
+        if (selectedMachineId) {
+            void loadRunnerImportableSessions(selectedMachineId, flavor)
+        }
+    }, [loadRunnerImportableSessions, selectedMachineId])
+
+    const handleReload = useCallback(() => {
+        if (selectedMachineId) {
+            setRunnerImportRefreshError(null)
+            void loadRunnerImportableSessions(selectedMachineId, selectedFlavor, { refresh: true, silent: true })
+        }
+    }, [loadRunnerImportableSessions, selectedFlavor, selectedMachineId])
+
+    const handleImportRunnerSessions = useCallback(async (sessionIds: string[]) => {
+        if (!selectedMachineId || isImportingRunnerSessions) return
+
+        setIsImportingRunnerSessions(true)
+        try {
+            const result = await api.importRunnerAgentSessions(selectedMachineId, {
+                flavor: selectedFlavor,
+                sessionIds,
+                pageSize: 100
+            })
+            if (!result.success) {
+                throw new Error(result.error)
+            }
+
+            const appendedMessages = result.results.reduce((total, item) => total + (item.appendedMessages ?? 0), 0)
+            const failedResults = result.results.filter((item) => item.error)
+            setRunnerImportFailures(failedResults)
+            addToast({
+                title: failedResults.length > 0 ? t('runnerImport.partial.title') : t('runnerImport.success.title'),
+                body: t('runnerImport.success.body', {
+                    sessions: result.importedCount,
+                    messages: appendedMessages,
+                    failures: failedResults.length
+                }),
+                sessionId: '',
+                url: ''
+            })
+            if (failedResults.length === 0) {
+                setIsImportOpen(false)
+            }
+            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+        } catch (error) {
+            addToast({
+                title: t('runnerImport.failed.title'),
+                body: error instanceof Error ? error.message : t('runnerImport.failed.body'),
+                sessionId: '',
+                url: ''
+            })
+        } finally {
+            setIsImportingRunnerSessions(false)
+        }
+    }, [addToast, api, isImportingRunnerSessions, queryClient, selectedFlavor, selectedMachineId, t])
+
+    return (
+        <div className="min-h-full bg-[var(--app-bg)] text-[var(--app-fg)]">
+            <div className="mx-auto w-full max-w-content px-3 py-4">
+                <div className="mb-4 flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => navigate({ to: '/sessions' })}
+                        className="rounded-full p-2 text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                        aria-label={t('runnerImport.runners.back')}
+                    >
+                        <BackIcon className="h-5 w-5" />
+                    </button>
+                    <div className="min-w-0 flex-1">
+                        <h1 className="text-lg font-semibold">{t('runnerImport.runners.title')}</h1>
+                        <p className="text-xs text-[var(--app-hint)]">{t('runnerImport.runners.description')}</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => void refetch()}
+                        className="rounded-md border border-[var(--app-border)] px-3 py-1.5 text-xs text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                    >
+                        {t('runnerImport.runners.refresh')}
+                    </button>
+                </div>
+
+                {error ? (
+                    <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-600">
+                        {error}
+                    </div>
+                ) : null}
+
+                {isLoading ? (
+                    <div className="rounded-lg border border-[var(--app-border)] px-4 py-8 text-center text-sm text-[var(--app-hint)]">
+                        {t('runnerImport.runners.loading')}
+                    </div>
+                ) : machines.length === 0 ? (
+                    <div className="rounded-lg border border-[var(--app-border)] px-4 py-8 text-center text-sm text-[var(--app-hint)]">
+                        {t('runnerImport.runners.empty')}
+                    </div>
+                ) : (
+                    <div className="space-y-2">
+                        {machines.map((machine) => (
+                            <div
+                                key={machine.id}
+                                className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-3 shadow-sm"
+                            >
+                                <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <div className="truncate text-sm font-medium">{getMachineTitle(machine)}</div>
+                                        <div className="mt-0.5 truncate text-xs text-[var(--app-hint)]">{getMachineSubtitle(machine)}</div>
+                                        {machine.metadata?.workspaceRoots?.length ? (
+                                            <div className="mt-1 truncate text-[11px] text-[var(--app-hint)]">
+                                                {t('runnerImport.runners.workspaceRoots', { roots: machine.metadata.workspaceRoots.join(', ') })}
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => openRunnerImportDialog(machine.id)}
+                                        className="shrink-0 rounded-md bg-[var(--app-link)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                                    >
+                                        {t('runnerImport.runners.importHistory')}
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            <RunnerSessionImportDialog
+                isOpen={isImportOpen}
+                onClose={() => setIsImportOpen(false)}
+                machines={machines}
+                selectedMachineId={selectedMachineId}
+                onMachineChange={handleMachineChange}
+                selectedFlavor={selectedFlavor}
+                onFlavorChange={handleFlavorChange}
+                sessions={runnerImportSessions}
+                isLoading={isLoadingRunnerImportSessions}
+                isRefreshing={isRefreshingRunnerImportSessions}
+                isPending={isImportingRunnerSessions}
+                onReload={handleReload}
+                failures={runnerImportFailures}
+                refreshError={runnerImportRefreshError}
+                onConfirm={handleImportRunnerSessions}
+            />
+        </div>
+    )
 }
 
 /**
@@ -1199,6 +1479,12 @@ const newSessionRoute = createRoute({
     component: NewSessionPage,
 })
 
+const machinesRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/machines',
+    component: MachinesPage,
+})
+
 const browseRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/browse',
@@ -1252,6 +1538,7 @@ export const routeTree = rootRoute.addChildren([
         ]),
     ]),
     browseRoute,
+    machinesRoute,
     settingsRoute,
     shareRoute,
 ])

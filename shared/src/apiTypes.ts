@@ -89,6 +89,127 @@ export type SpawnResponse =
     | { type: 'success'; sessionId: string }
     | { type: 'error'; message: string }
 
+export const RunnerImportFlavorSchema = z.enum(['claude', 'codex', 'opencode'])
+export type RunnerImportFlavor = z.infer<typeof RunnerImportFlavorSchema>
+
+export const RunnerImportableSessionsRequestSchema = z.object({
+    flavor: RunnerImportFlavorSchema.optional().default('claude'),
+    refresh: z.boolean().optional().default(false)
+})
+
+export type RunnerImportableSessionsRequest = z.infer<typeof RunnerImportableSessionsRequestSchema>
+
+export const RunnerImportableSessionSummarySchema = z.object({
+    id: z.string().min(1),
+    flavor: RunnerImportFlavorSchema,
+    title: z.string().min(1),
+    cwd: z.string().nullable().optional(),
+    lastUserMessage: z.string().nullable().optional(),
+    modifiedAt: z.number().int().nonnegative(),
+    messageCount: z.number().int().nonnegative().optional(),
+    byteSize: z.number().int().nonnegative().optional()
+})
+
+export type RunnerImportableSessionSummary = z.infer<typeof RunnerImportableSessionSummarySchema>
+
+export const RunnerImportableSessionsResponseSchema = z.union([
+    z.object({
+        success: z.literal(true),
+        sessions: z.array(RunnerImportableSessionSummarySchema),
+        cachedAt: z.number().int().nonnegative().optional(),
+        refreshing: z.boolean().optional(),
+        refreshStartedAt: z.number().int().nonnegative().optional(),
+        refreshError: z.string().optional()
+    }),
+    z.object({
+        success: z.literal(false),
+        error: z.string()
+    })
+])
+
+export type RunnerImportableSessionsResponse = z.infer<typeof RunnerImportableSessionsResponseSchema>
+
+export const RunnerImportSessionsRequestSchema = z.object({
+    flavor: RunnerImportFlavorSchema.optional().default('claude'),
+    sessionIds: z.array(z.string().min(1)).min(1).max(50),
+    pageSize: z.number().int().min(1).max(500).optional().default(100)
+})
+
+export type RunnerImportSessionsRequest = z.infer<typeof RunnerImportSessionsRequestSchema>
+
+export const RunnerImportedSessionMessageSchema = z.object({
+    sourceKey: z.string().min(1),
+    createdAt: z.number().int().nonnegative().optional(),
+    message: z.object({
+        role: z.enum(['user', 'agent']),
+        content: z.unknown(),
+        meta: z.record(z.string(), z.unknown()).optional()
+    })
+})
+
+export type RunnerImportedSessionMessage = z.infer<typeof RunnerImportedSessionMessageSchema>
+
+export const RunnerImportedSessionPayloadSchema = RunnerImportableSessionSummarySchema.extend({
+    messages: z.array(RunnerImportedSessionMessageSchema)
+})
+
+export type RunnerImportedSessionPayload = z.infer<typeof RunnerImportedSessionPayloadSchema>
+
+export const RunnerImportSessionPageRequestSchema = z.object({
+    flavor: RunnerImportFlavorSchema.optional().default('claude'),
+    sessionId: z.string().min(1),
+    cursor: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(500).optional().default(100)
+})
+
+export type RunnerImportSessionPageRequest = z.infer<typeof RunnerImportSessionPageRequestSchema>
+
+export const RunnerImportedSessionPageSchema = RunnerImportedSessionPayloadSchema.extend({
+    totalMessages: z.number().int().nonnegative(),
+    nextCursor: z.string().min(1).nullable().optional(),
+    done: z.boolean()
+})
+
+export type RunnerImportedSessionPage = z.infer<typeof RunnerImportedSessionPageSchema>
+
+export const RunnerImportSessionPageResponseSchema = z.union([
+    z.object({
+        success: z.literal(true),
+        page: RunnerImportedSessionPageSchema
+    }),
+    z.object({
+        success: z.literal(false),
+        error: z.string()
+    })
+])
+
+export type RunnerImportSessionPageResponse = z.infer<typeof RunnerImportSessionPageResponseSchema>
+
+export const RunnerImportSessionResultSchema = z.object({
+    agentSessionId: z.string().min(1),
+    hapiSessionId: z.string().optional(),
+    created: z.boolean().optional(),
+    appendedMessages: z.number().int().nonnegative().optional(),
+    skippedMessages: z.number().int().nonnegative().optional(),
+    error: z.string().optional()
+})
+
+export type RunnerImportSessionResult = z.infer<typeof RunnerImportSessionResultSchema>
+
+export const RunnerImportSessionsResponseSchema = z.union([
+    z.object({
+        success: z.literal(true),
+        importedCount: z.number().int().nonnegative(),
+        results: z.array(RunnerImportSessionResultSchema)
+    }),
+    z.object({
+        success: z.literal(false),
+        error: z.string()
+    })
+])
+
+export type RunnerImportSessionsResponse = z.infer<typeof RunnerImportSessionsResponseSchema>
+
 export const SessionPermissionModeRequestSchema = z.object({
     mode: PermissionModeSchema
 })

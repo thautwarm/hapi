@@ -27,6 +27,18 @@ import { buildMachineMetadata } from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
 import { hashRunnerCliApiToken } from './runnerIdentity';
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
+import type { RunnerImportableSessionsRequest, RunnerImportableSessionsResponse, RunnerImportSessionPageRequest, RunnerImportSessionPageResponse } from '@hapi/protocol';
+import { getClaudeCodeSessionImportPage, listClaudeCodeImportableSessions } from './import/claudeCode';
+import { getCodexSessionImportPage, listCodexImportableSessions } from './import/codex';
+import { getOpencodeSessionImportPage, listOpencodeImportableSessions } from './import/opencode';
+
+type ImportableSessionsCacheEntry = {
+  sessions: Extract<RunnerImportableSessionsResponse, { success: true }>['sessions'];
+  cachedAt: number;
+  refreshing: boolean;
+  refreshStartedAt?: number;
+  refreshError?: string;
+};
 
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
   // We don't have cleanup function at the time of server construction
@@ -777,12 +789,129 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
     // Create realtime machine session
     const apiMachine = api.machineSyncClient(machine, { workspaceRoots });
+    const importableSessionsCache = new Map<string, ImportableSessionsCacheEntry>();
+
+    const loadImportableAgentSessions = async (params: RunnerImportableSessionsRequest) => {
+      switch (params.flavor) {
+        case 'claude':
+          return await listClaudeCodeImportableSessions();
+        case 'codex':
+          return await listCodexImportableSessions();
+        case 'opencode':
+          return await listOpencodeImportableSessions();
+      }
+    };
+
+    const refreshImportableAgentSessionsCache = (
+      cacheKey: string,
+      params: RunnerImportableSessionsRequest
+    ): void => {
+      const existing = importableSessionsCache.get(cacheKey);
+      if (existing?.refreshing) return;
+
+      const startedAt = Date.now();
+      importableSessionsCache.set(cacheKey, {
+        sessions: existing?.sessions ?? [],
+        cachedAt: existing?.cachedAt ?? 0,
+        refreshing: true,
+        refreshStartedAt: startedAt
+      });
+
+      void (async () => {
+        try {
+          const sessions = await loadImportableAgentSessions(params);
+          importableSessionsCache.set(cacheKey, {
+            sessions,
+            cachedAt: Date.now(),
+            refreshing: false
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to list importable sessions';
+          logger.debug(`[RUNNER RUN] Failed to refresh cached importable ${params.flavor} sessions`, error);
+          const current = importableSessionsCache.get(cacheKey);
+          importableSessionsCache.set(cacheKey, {
+            sessions: current?.sessions ?? [],
+            cachedAt: current?.cachedAt ?? 0,
+            refreshing: false,
+            refreshStartedAt: startedAt,
+            refreshError: errorMessage
+          });
+        }
+      })();
+    };
+
+    const listImportableAgentSessions = async (params: RunnerImportableSessionsRequest): Promise<RunnerImportableSessionsResponse> => {
+      try {
+        const cacheKey = params.flavor;
+        const cached = importableSessionsCache.get(cacheKey);
+        if (!cached) {
+          importableSessionsCache.set(cacheKey, {
+            sessions: [],
+            cachedAt: 0,
+            refreshing: false
+          });
+          refreshImportableAgentSessionsCache(cacheKey, params);
+          const latest = importableSessionsCache.get(cacheKey);
+          return {
+            success: true,
+            sessions: latest?.sessions ?? [],
+            cachedAt: latest?.cachedAt ?? 0,
+            refreshing: latest?.refreshing ?? true,
+            refreshStartedAt: latest?.refreshStartedAt
+          };
+        }
+
+        if (params.refresh) {
+          refreshImportableAgentSessionsCache(cacheKey, params);
+        }
+
+        const latest = importableSessionsCache.get(cacheKey) ?? cached;
+        return {
+          success: true,
+          sessions: latest.sessions,
+          cachedAt: latest.cachedAt,
+          refreshing: latest.refreshing,
+          refreshStartedAt: latest.refreshStartedAt,
+          refreshError: latest.refreshError
+        };
+      } catch (error) {
+        logger.debug(`[RUNNER RUN] Failed to list importable ${params.flavor} sessions`, error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list importable sessions' };
+      }
+    };
+
+    const getImportableAgentSessionPage = async (params: RunnerImportSessionPageRequest): Promise<RunnerImportSessionPageResponse> => {
+      try {
+        switch (params.flavor) {
+          case 'claude':
+            return {
+              success: true,
+              page: await getClaudeCodeSessionImportPage(params)
+            };
+          case 'codex':
+            return {
+              success: true,
+              page: await getCodexSessionImportPage(params)
+            };
+          case 'opencode':
+            return {
+              success: true,
+              page: await getOpencodeSessionImportPage(params)
+            };
+        }
+      } catch (error) {
+        logger.debug(`[RUNNER RUN] Failed to load ${params.flavor} session page for import`, error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to import session page' };
+      }
+    };
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
-      requestShutdown: () => requestShutdown('hapi-app')
+      requestShutdown: () => requestShutdown('hapi-app'),
+      listImportableAgentSessions,
+      getImportableAgentSessionPage
     });
 
     // Connect to server

@@ -37,6 +37,9 @@ import type {
     OpencodeModelsResponse,
     OpencodeReasoningEffortResponse,
     ReopenSessionResponse,
+    RunnerImportableSessionsResponse,
+    RunnerImportSessionsRequest,
+    RunnerImportSessionsResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor } from '@hapi/protocol'
@@ -583,6 +586,32 @@ export class ApiClient {
             {
                 method: 'POST',
                 body: JSON.stringify({ paths })
+            }
+        )
+    }
+
+    async getRunnerImportableSessions(
+        machineId: string,
+        flavor: RunnerImportSessionsRequest['flavor'] = 'claude',
+        options: { refresh?: boolean } = {}
+    ): Promise<RunnerImportableSessionsResponse> {
+        const params = new URLSearchParams()
+        params.set('flavor', flavor)
+        if (options.refresh) params.set('refresh', '1')
+        return await this.request<RunnerImportableSessionsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/importable-sessions?${params.toString()}`
+        )
+    }
+
+    async importRunnerAgentSessions(
+        machineId: string,
+        payload: RunnerImportSessionsRequest
+    ): Promise<RunnerImportSessionsResponse> {
+        return await this.request<RunnerImportSessionsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/import-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify(payload)
             }
         )
     }

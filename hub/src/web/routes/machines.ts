@@ -1,6 +1,8 @@
 import {
     MachineListDirectoryRequestSchema,
     MachinePathsExistsRequestSchema,
+    RunnerImportableSessionsRequestSchema,
+    RunnerImportSessionsRequestSchema,
     SpawnSessionRequestSchema
 } from '@hapi/protocol'
 import { Hono } from 'hono'
@@ -53,6 +55,70 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.effort
         )
         return c.json(result)
+    })
+
+    app.get('/machines/:id/importable-sessions', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        const refreshQuery = c.req.query('refresh')
+        const parsed = RunnerImportableSessionsRequestSchema.safeParse({
+            flavor: c.req.query('flavor') ?? undefined,
+            refresh: refreshQuery === undefined
+                ? undefined
+                : refreshQuery === '1' || refreshQuery === 'true'
+        })
+        if (!parsed.success) {
+            return c.json({ success: false, error: 'Invalid query' }, 400)
+        }
+
+        try {
+            const result = await engine.listImportableAgentSessions(machineId, parsed.data)
+            return c.json(result)
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list importable sessions'
+            }, 500)
+        }
+    })
+
+    app.post('/machines/:id/import-sessions', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = RunnerImportSessionsRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ success: false, error: 'Invalid body' }, 400)
+        }
+
+        try {
+            const namespace = c.get('namespace')
+            const result = await engine.importRunnerAgentSessions(machineId, namespace, parsed.data)
+            return c.json(result)
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to import sessions'
+            }, 500)
+        }
     })
 
     app.post('/machines/:id/list-directory', async (c) => {

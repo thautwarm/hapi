@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { I18nProvider } from '@/lib/i18n-context'
 import {
+    buildOutlinePageItems,
     ConversationOutlinePanel,
     captureScrollAnchor,
     getScrollIntent,
@@ -97,10 +98,42 @@ describe('ConversationOutlinePanel', () => {
         expect(onPageSelect).toHaveBeenCalledWith(1)
     })
 
+    it('renders a BBS-style page bar with ellipses and next page', () => {
+        const onPageSelect = vi.fn()
+        const rendered = renderPanel({
+            activePage: 6,
+            onPageSelect,
+            pages: Array.from({ length: 10 }, (_, index) => ({
+                page: index + 1,
+                displayTitle: `Page ${index + 1}`,
+                stageIds: [`stage:${index + 1}`],
+                messageCount: 1
+            }))
+        })
+        const scope = within(rendered.container)
+
+        expect(scope.getByRole('navigation', { name: 'Page navigation' })).toBeInTheDocument()
+        expect(scope.getByRole('button', { name: 'Go to page 1' })).toBeInTheDocument()
+        expect(scope.getByRole('button', { name: 'Go to page 10' })).toBeInTheDocument()
+        expect(scope.getAllByText('...')).toHaveLength(2)
+
+        fireEvent.click(scope.getByRole('button', { name: 'Next page' }))
+
+        expect(onPageSelect).toHaveBeenCalledWith(7)
+    })
+
     it('renders an empty state', () => {
         renderPanel({ items: [] })
 
         expect(screen.getByText('No outline items in loaded messages')).toBeInTheDocument()
+    })
+})
+
+describe('buildOutlinePageItems', () => {
+    it('builds compact page ranges around the active page', () => {
+        expect(buildOutlinePageItems(6, 10)).toEqual([1, 'ellipsis', 5, 6, 7, 'ellipsis', 10])
+        expect(buildOutlinePageItems(2, 10)).toEqual([1, 2, 3, 'ellipsis', 10])
+        expect(buildOutlinePageItems(9, 10)).toEqual([1, 'ellipsis', 8, 9, 10])
     })
 })
 

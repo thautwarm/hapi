@@ -155,6 +155,48 @@ const THREAD_MESSAGE_COMPONENTS = {
     SystemMessage: HappySystemMessage
 } as const
 
+type OutlinePageItem = number | 'ellipsis'
+
+export function buildOutlinePageItems(activePage: number | null, totalPages: number): OutlinePageItem[] {
+    if (totalPages <= 0) {
+        return []
+    }
+    const current = Math.max(1, Math.min(totalPages, activePage ?? totalPages))
+    if (totalPages <= 7) {
+        return Array.from({ length: totalPages }, (_, index) => index + 1)
+    }
+
+    const pages = new Set<number>([1, totalPages, current])
+    if (current <= 4) {
+        pages.add(2)
+        pages.add(3)
+    } else {
+        pages.add(current - 1)
+    }
+    if (current >= totalPages - 3) {
+        pages.add(totalPages - 1)
+        pages.add(totalPages - 2)
+    } else {
+        pages.add(current + 1)
+    }
+
+    const sorted = Array.from(pages)
+        .filter((page) => page >= 1 && page <= totalPages)
+        .sort((left, right) => left - right)
+
+    const items: OutlinePageItem[] = []
+    for (const page of sorted) {
+        const previous = typeof items[items.length - 1] === 'number'
+            ? items[items.length - 1]
+            : null
+        if (typeof previous === 'number' && page - previous > 1) {
+            items.push('ellipsis')
+        }
+        items.push(page)
+    }
+    return items
+}
+
 export function ConversationOutlinePanel(props: {
     title: string
     items: readonly ConversationOutlineItem[]
@@ -170,6 +212,8 @@ export function ConversationOutlinePanel(props: {
     const { t } = useTranslation()
     const activePage = props.activePage ?? null
     const selectedPage = activePage !== null ? `${activePage}` : ''
+    const totalPages = props.pages?.length ?? 0
+    const pageItems = buildOutlinePageItems(activePage, totalPages)
 
     return (
         <aside
@@ -221,9 +265,65 @@ export function ConversationOutlinePanel(props: {
                         <div className="mt-1 text-xs text-[var(--app-hint)]">
                             {t('session.outline.pageStatus', {
                                 page: activePage,
-                                total: props.pages.length
+                                total: totalPages
                             })}
                         </div>
+                    ) : null}
+                    {pageItems.length > 0 ? (
+                        <nav
+                            className="mt-2 flex flex-wrap items-center gap-1"
+                            aria-label={t('session.outline.pageBar')}
+                        >
+                            <button
+                                type="button"
+                                onClick={() => activePage !== null ? props.onPageSelect?.(activePage - 1) : undefined}
+                                disabled={activePage === null || activePage <= 1}
+                                className="min-w-7 rounded-md border border-[var(--app-border)] px-2 py-1 text-xs text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40 hover:not-disabled:bg-[var(--app-subtle-bg)]"
+                                aria-label={t('session.outline.previousPage')}
+                            >
+                                ‹
+                            </button>
+                            {pageItems.map((item, index) => {
+                                if (item === 'ellipsis') {
+                                    return (
+                                        <span
+                                            key={`ellipsis-${index}`}
+                                            className="px-1 text-xs text-[var(--app-hint)]"
+                                            aria-hidden="true"
+                                        >
+                                            ...
+                                        </span>
+                                    )
+                                }
+                                const selected = activePage === item
+                                return (
+                                    <button
+                                        key={item}
+                                        type="button"
+                                        onClick={() => props.onPageSelect?.(item)}
+                                        aria-current={selected ? 'page' : undefined}
+                                        aria-label={t('session.outline.goToPage', { page: item })}
+                                        className={[
+                                            'min-w-7 rounded-md border px-2 py-1 text-xs font-medium transition-colors',
+                                            selected
+                                                ? 'border-[var(--app-button)] bg-[var(--app-button)] text-[var(--app-button-text)]'
+                                                : 'border-[var(--app-border)] text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)]'
+                                        ].join(' ')}
+                                    >
+                                        {item}
+                                    </button>
+                                )
+                            })}
+                            <button
+                                type="button"
+                                onClick={() => activePage !== null ? props.onPageSelect?.(activePage + 1) : undefined}
+                                disabled={activePage === null || activePage >= totalPages}
+                                className="min-w-7 rounded-md border border-[var(--app-border)] px-2 py-1 text-xs text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40 hover:not-disabled:bg-[var(--app-subtle-bg)]"
+                                aria-label={t('session.outline.nextPage')}
+                            >
+                                ›
+                            </button>
+                        </nav>
                     ) : null}
                 </div>
             ) : null}

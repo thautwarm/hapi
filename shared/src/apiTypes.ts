@@ -73,6 +73,34 @@ export type AuthResponse = {
 
 export type SessionsResponse = { sessions: SessionSummary[] }
 export type SessionResponse = { session: Session }
+export type MessageStageSummary = {
+    id: string
+    displayTitle: string
+    page: number
+    startMessageId: string
+    targetMessageId: string | null
+    startSeq: number
+    startAt: number
+    endSeq: number
+    endAt: number
+    messageCount: number
+}
+
+export type MessageStagePageSummary = {
+    page: number
+    displayTitle: string
+    stageIds: string[]
+    messageCount: number
+}
+
+export type MessageStagesResponse = {
+    stagesPerPage: number
+    totalStages: number
+    totalPages: number
+    stages: MessageStageSummary[]
+    pages: MessageStagePageSummary[]
+}
+
 export type MessagesResponse = {
     messages: DecryptedMessage[]
     page: {
@@ -80,6 +108,14 @@ export type MessagesResponse = {
         nextBeforeSeq: number | null
         nextBeforeAt: number | null
         hasMore: boolean
+        stagePage?: {
+            currentPage: number
+            totalPages: number
+            stagesPerPage: number
+            stageIds: string[]
+            stages: MessageStageSummary[]
+            messageStageIds: Record<string, string>
+        }
     }
 }
 
@@ -338,12 +374,23 @@ export const MessagesQuerySchema = z.object({
     limit: z.coerce.number().int().min(1).max(200).optional(),
     beforeSeq: z.coerce.number().int().min(1).optional(),
     beforeAt: z.coerce.number().int().min(0).optional(),
+    stagePage: z.coerce.number().int().min(1).optional(),
+    stagesPerPage: z.coerce.number().int().min(1).max(50).optional(),
 }).refine((data) => (data.beforeAt === undefined) === (data.beforeSeq === undefined), {
     message: 'beforeAt and beforeSeq must be provided together',
     path: ['beforeAt'],
+}).refine((data) => data.stagePage === undefined || data.beforeAt === undefined, {
+    message: 'stagePage cannot be combined with beforeAt/beforeSeq',
+    path: ['stagePage'],
 })
 
 export type MessagesQuery = z.infer<typeof MessagesQuerySchema>
+
+export const MessageStagesQuerySchema = z.object({
+    stagesPerPage: z.coerce.number().int().min(1).max(50).optional()
+})
+
+export type MessageStagesQuery = z.infer<typeof MessageStagesQuerySchema>
 
 export const SendMessageRequestSchema = z.object({
     text: z.string(),

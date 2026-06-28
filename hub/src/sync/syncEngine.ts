@@ -11,6 +11,8 @@ import { isKnownFlavor, type LocalResumeTarget, type ResumableSession } from '@h
 import type {
     CursorMigrateOutcome,
     CursorMigrateToAcpRequest,
+    MessageStagesResponse,
+    MessagesResponse,
     RunnerImportableSessionsRequest,
     RunnerImportableSessionsResponse,
     RunnerImportedSessionMessage,
@@ -361,16 +363,19 @@ export class SyncEngine {
     getMessagesPage(
         sessionId: string,
         options: { limit: number; before?: { at: number; seq: number } | null }
-    ): {
-        messages: DecryptedMessage[]
-        page: {
-            limit: number
-            nextBeforeSeq: number | null
-            nextBeforeAt: number | null
-            hasMore: boolean
-        }
-    } {
+    ): MessagesResponse {
         return this.messageService.getMessagesPage(sessionId, options)
+    }
+
+    getMessageStages(sessionId: string, options: { stagesPerPage?: number } = {}): MessageStagesResponse {
+        return this.messageService.getMessageStages(sessionId, options)
+    }
+
+    getMessagesStagePage(
+        sessionId: string,
+        options: { stagePage: number; stagesPerPage?: number }
+    ): MessagesResponse {
+        return this.messageService.getMessagesStagePage(sessionId, options)
     }
 
     getSessionExport(sessionId: string, session: Session): HapiSessionExportResult {

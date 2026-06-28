@@ -20,6 +20,7 @@ export type MessageWindowState = {
 
 export const VISIBLE_WINDOW_SIZE = 400
 export const PENDING_WINDOW_SIZE = 200
+export const MESSAGE_STAGES_PER_PAGE = 8
 const AGENT_RUN_WINDOW_SIZE = 800
 const OLDER_LOAD_WINDOW_SIZE = VISIBLE_WINDOW_SIZE * 2
 const PAGE_SIZE = 50
@@ -928,6 +929,49 @@ export async function fetchOlderMessages(api: ApiClient, sessionId: string): Pro
         }
         const message = error instanceof Error ? error.message : 'Failed to load messages'
         updateStateForGeneration(sessionId, 'older', generation, (prev) => buildState(prev, { isLoadingMore: false, warning: message }))
+    }
+}
+
+export async function fetchMessageStagePage(
+    api: ApiClient,
+    sessionId: string,
+    stagePage: number,
+    stagesPerPage: number = MESSAGE_STAGES_PER_PAGE
+): Promise<void> {
+    const generation = beginAsyncGeneration(sessionId, 'latest', {
+        isLoading: true,
+        warning: null,
+        atBottom: false
+    })
+
+    try {
+        const response = await api.getMessages(sessionId, {
+            stagePage,
+            stagesPerPage
+        })
+        if (!isCurrentGeneration(sessionId, 'latest', generation)) {
+            return
+        }
+
+        updateStateForGeneration(sessionId, 'latest', generation, (prev) => buildState(prev, {
+            messages: response.messages,
+            pending: filterPendingAgainstVisible(prev.pending, response.messages),
+            hasMore: response.page.hasMore,
+            oldestPositionAt: response.page.nextBeforeAt,
+            oldestPositionSeq: response.page.nextBeforeSeq,
+            isLoading: false,
+            warning: null,
+            atBottom: false
+        }), true)
+    } catch (error) {
+        if (!isCurrentGeneration(sessionId, 'latest', generation)) {
+            return
+        }
+        const message = error instanceof Error ? error.message : 'Failed to load messages'
+        updateStateForGeneration(sessionId, 'latest', generation, (prev) => buildState(prev, {
+            isLoading: false,
+            warning: message
+        }), true)
     }
 }
 

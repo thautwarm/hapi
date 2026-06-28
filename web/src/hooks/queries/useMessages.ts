@@ -3,9 +3,11 @@ import type { ApiClient } from '@/api/client'
 import type { DecryptedMessage } from '@/types/api'
 import {
     fetchLatestMessages,
+    fetchMessageStagePage,
     fetchOlderMessages,
     flushPendingMessages,
     getMessageWindowState,
+    MESSAGE_STAGES_PER_PAGE,
     setAtBottom as setMessageWindowAtBottom,
     subscribeMessageWindow,
     type MessageWindowState,
@@ -36,6 +38,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     pendingCount: number
     messagesVersion: number
     loadMore: () => Promise<unknown>
+    loadStagePage: (page: number) => Promise<unknown>
     refetch: () => Promise<unknown>
     flushPending: () => Promise<void>
     setAtBottom: (atBottom: boolean) => void
@@ -74,6 +77,11 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         await fetchLatestMessages(api, sessionId)
     }, [api, sessionId])
 
+    const loadStagePage = useCallback(async (page: number) => {
+        if (!api || !sessionId) return
+        await fetchMessageStagePage(api, sessionId, page, MESSAGE_STAGES_PER_PAGE)
+    }, [api, sessionId])
+
     const flushPending = useCallback(async () => {
         if (!sessionId) return
         const needsRefresh = flushPendingMessages(sessionId)
@@ -97,6 +105,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         pendingCount: state.pendingCount,
         messagesVersion: state.messagesVersion,
         loadMore,
+        loadStagePage,
         refetch,
         flushPending,
         setAtBottom,

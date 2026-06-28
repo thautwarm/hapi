@@ -9,6 +9,7 @@ import type {
     DecryptedMessage,
     PermissionMode,
     Session,
+    MessageStagesResponse,
     PiModelSummary,
     SlashCommand
 } from '@/types/api'
@@ -17,9 +18,10 @@ import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
 import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
-import { buildConversationOutline } from '@/chat/outline'
+import { buildConversationOutline, buildConversationOutlineFromStages } from '@/chat/outline'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
 import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+import { MESSAGE_STAGES_PER_PAGE } from '@/lib/message-window-store'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
@@ -359,6 +361,7 @@ type SessionChatProps = {
     onBack: () => void
     onRefresh: () => void
     onLoadMore: () => Promise<unknown>
+    onLoadStagePage?: (page: number) => Promise<unknown>
     // Resolves true when the send was accepted by the underlying mutation, false when
     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async
     // inactive-session resume failed. Composer state that should only be cleared on
@@ -411,6 +414,8 @@ function SessionChatInner(props: SessionChatProps) {
     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
     const [forceScrollToken, setForceScrollToken] = useState(0)
     const [outlineOpen, setOutlineOpen] = useState(props.initialOutlineOpen ?? false)
+    const [messageStages, setMessageStages] = useState<MessageStagesResponse | null>(null)
+    const [activeOutlinePage, setActiveOutlinePage] = useState<number | null>(null)
     useEffect(() => {
         if (!props.initialOutlineOpen) {
             return
@@ -418,6 +423,33 @@ function SessionChatInner(props: SessionChatProps) {
         setOutlineOpen(true)
         props.onInitialOutlineConsumed?.()
     }, [props.initialOutlineOpen, props.onInitialOutlineConsumed])
+
+    useEffect(() => {
+        setMessageStages(null)
+        setActiveOutlinePage(null)
+    }, [props.session.id])
+
+    useEffect(() => {
+        if (!outlineOpen) {
+            return
+        }
+        let cancelled = false
+        void props.api.getMessageStages(props.session.id, {
+            stagesPerPage: MESSAGE_STAGES_PER_PAGE
+        }).then((response) => {
+            if (cancelled) {
+                return
+            }
+            setMessageStages(response)
+            setActiveOutlinePage((current) => current ?? (response.totalPages > 0 ? response.totalPages : null))
+        }).catch((error) => {
+            console.error('Failed to load message stages:', error)
+        })
+
+        return () => {
+            cancelled = true
+        }
+    }, [outlineOpen, props.api, props.session.id])
 
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
@@ -876,14 +908,33 @@ function SessionChatInner(props: SessionChatProps) {
     }, [visibleBlocks])
 
     const outlineItems = useMemo(
-        () => buildConversationOutline(reconciled.blocks),
-        [reconciled.blocks]
+        () => {
+            if (messageStages && activeOutlinePage !== null) {
+                return buildConversationOutlineFromStages(
+                    messageStages.stages.filter((stage) => stage.page === activeOutlinePage)
+                )
+            }
+            return buildConversationOutline(reconciled.blocks)
+        },
+        [activeOutlinePage, messageStages, reconciled.blocks]
     )
 
     const outlineTitle = useMemo(
         () => getOutlineTitle(props.session),
         [props.session]
     )
+
+    const handleOutlinePageSelect = useCallback(async (page: number) => {
+        const pageCount = messageStages?.totalPages ?? 0
+        if (pageCount === 0) {
+            return
+        }
+        const nextPage = Math.max(1, Math.min(pageCount, Math.trunc(page)))
+        setActiveOutlinePage(nextPage)
+        if (props.onLoadStagePage) {
+            await props.onLoadStagePage(nextPage)
+        }
+    }, [messageStages?.totalPages, props.onLoadStagePage])
 
     // Permission mode change handler
     const handlePermissionModeChange = useCallback(async (mode: PermissionMode) => {
@@ -1167,7 +1218,10 @@ function SessionChatInner(props: SessionChatProps) {
                         outlineOpen={outlineOpen}
                         outlineTitle={outlineTitle}
                         outlineItems={outlineItems}
+                        outlinePages={messageStages?.pages}
+                        activeOutlinePage={activeOutlinePage}
                         onOutlineOpenChange={setOutlineOpen}
+                        onOutlinePageSelect={handleOutlinePageSelect}
                     />
 
                     {codexCollaborationModeSupported && codexModelsState.error ? (

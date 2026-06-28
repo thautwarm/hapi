@@ -904,6 +904,7 @@ function SessionPage() {
         isLoadingMore: messagesLoadingMore,
         hasMore: messagesHasMore,
         loadMore: loadMoreMessages,
+        loadStagePage: loadMessageStagePage,
         refetch: refetchMessages,
         pendingCount,
         messagesVersion,
@@ -1194,6 +1195,7 @@ function SessionPage() {
             onBack={goBack}
             onRefresh={refreshSelectedSession}
             onLoadMore={loadMoreMessages}
+            onLoadStagePage={loadMessageStagePage}
             onSend={sendMessage}
             onFlushPending={flushPending}
             onAtBottomChange={setAtBottom}

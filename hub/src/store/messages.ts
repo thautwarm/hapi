@@ -245,6 +245,122 @@ export function getMessagesByPosition(
     return rows.reverse().map(toStoredMessage)
 }
 
+export function getFirstMessagesByPosition(
+    db: Database,
+    sessionId: string,
+    limit: number = 50
+): StoredMessage[] {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, limit)) : 50
+    const rows = db.prepare(`
+        SELECT *, COALESCE(invoked_at, created_at) AS position_at
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY position_at ASC, seq ASC
+        LIMIT ?
+    `).all(sessionId, safeLimit) as DbMessageRow[]
+    return rows.map(toStoredMessage)
+}
+
+export function getUserMessagesByPosition(
+    db: Database,
+    sessionId: string
+): StoredMessage[] {
+    const rows = db.prepare(`
+        SELECT *, COALESCE(invoked_at, created_at) AS position_at
+        FROM messages
+        WHERE session_id = ?
+          AND (
+            json_extract(content, '$.role') = 'user'
+            OR json_extract(content, '$.message.role') = 'user'
+            OR json_extract(content, '$.data.message.role') = 'user'
+            OR json_extract(content, '$.payload.message.role') = 'user'
+          )
+        ORDER BY position_at ASC, seq ASC
+    `).all(sessionId) as DbMessageRow[]
+    return rows.map(toStoredMessage)
+}
+
+export function getMessagesByPositionRange(
+    db: Database,
+    sessionId: string,
+    start: { at: number; seq: number },
+    end?: { at: number; seq: number } | null
+): StoredMessage[] {
+    const endClause = end
+        ? 'AND (COALESCE(invoked_at, created_at) < @endAt OR (COALESCE(invoked_at, created_at) = @endAt AND seq < @endSeq))'
+        : ''
+    const rows = db.prepare(`
+        SELECT *, COALESCE(invoked_at, created_at) AS position_at
+        FROM messages
+        WHERE session_id = @sessionId
+          AND (COALESCE(invoked_at, created_at) > @startAt OR (COALESCE(invoked_at, created_at) = @startAt AND seq >= @startSeq))
+          ${endClause}
+        ORDER BY position_at ASC, seq ASC
+    `).all({
+        sessionId,
+        startAt: start.at,
+        startSeq: start.seq,
+        endAt: end?.at ?? null,
+        endSeq: end?.seq ?? null
+    }) as DbMessageRow[]
+    return rows.map(toStoredMessage)
+}
+
+export function countMessagesByPositionRange(
+    db: Database,
+    sessionId: string,
+    start: { at: number; seq: number },
+    end?: { at: number; seq: number } | null
+): number {
+    const endClause = end
+        ? 'AND (position_at < @endAt OR (position_at = @endAt AND seq < @endSeq))'
+        : ''
+    const row = db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM (
+            SELECT seq, COALESCE(invoked_at, created_at) AS position_at
+            FROM messages
+            WHERE session_id = @sessionId
+        )
+        WHERE (position_at > @startAt OR (position_at = @startAt AND seq >= @startSeq))
+          ${endClause}
+    `).get({
+        sessionId,
+        startAt: start.at,
+        startSeq: start.seq,
+        endAt: end?.at ?? null,
+        endSeq: end?.seq ?? null
+    }) as { count: number } | undefined
+    return row?.count ?? 0
+}
+
+export function getLastMessageByPositionRange(
+    db: Database,
+    sessionId: string,
+    start: { at: number; seq: number },
+    end?: { at: number; seq: number } | null
+): StoredMessage | null {
+    const endClause = end
+        ? 'AND (COALESCE(invoked_at, created_at) < @endAt OR (COALESCE(invoked_at, created_at) = @endAt AND seq < @endSeq))'
+        : ''
+    const row = db.prepare(`
+        SELECT *, COALESCE(invoked_at, created_at) AS position_at
+        FROM messages
+        WHERE session_id = @sessionId
+          AND (COALESCE(invoked_at, created_at) > @startAt OR (COALESCE(invoked_at, created_at) = @startAt AND seq >= @startSeq))
+          ${endClause}
+        ORDER BY position_at DESC, seq DESC
+        LIMIT 1
+    `).get({
+        sessionId,
+        startAt: start.at,
+        startSeq: start.seq,
+        endAt: end?.at ?? null,
+        endSeq: end?.seq ?? null
+    }) as DbMessageRow | undefined
+    return row ? toStoredMessage(row) : null
+}
+
 /** Returns user messages that have a localId but no invoked_at.
  *  Includes future scheduled messages — used to surface all queued messages
  *  (including scheduled) for the Web floating bar on refresh / secondary clients. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent, ChatBlock } from '@/chat/types'
-import { buildConversationOutline, truncateOutlineLabel } from '@/chat/outline'
+import { buildConversationOutline, buildConversationOutlineFromStages, truncateOutlineLabel } from '@/chat/outline'
 
 function userBlock(
     id: string,
@@ -82,5 +82,44 @@ describe('conversation outline', () => {
             'outline:user-text:first',
             'outline:user-text:second'
         ])
+    })
+
+    it('creates outline items from server-side stages', () => {
+        const items = buildConversationOutlineFromStages([
+            {
+                id: 'stage:intro',
+                displayTitle: 'Session start',
+                page: 1,
+                startMessageId: 'intro',
+                targetMessageId: null,
+                startSeq: 1,
+                startAt: 1000,
+                endSeq: 1,
+                endAt: 1000,
+                messageCount: 1
+            },
+            {
+                id: 'stage:prompt',
+                displayTitle: 'Implement pagination',
+                page: 2,
+                startMessageId: 'prompt',
+                targetMessageId: 'user-text:prompt',
+                startSeq: 2,
+                startAt: 2000,
+                endSeq: 4,
+                endAt: 4000,
+                messageCount: 3
+            }
+        ])
+
+        expect(items).toEqual([{
+            id: 'outline:stage:prompt',
+            targetMessageId: 'user-text:prompt',
+            kind: 'user',
+            label: 'Implement pagination',
+            createdAt: 2000,
+            stageId: 'stage:prompt',
+            stagePage: 2
+        }])
     })
 })

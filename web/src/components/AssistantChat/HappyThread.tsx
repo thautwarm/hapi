@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { ThreadPrimitive } from '@assistant-ui/react'
 import type { ApiClient } from '@/api/client'
-import type { SessionMetadataSummary } from '@/types/api'
+import type { MessageStagePageSummary, SessionMetadataSummary } from '@/types/api'
 import type { ConversationOutlineItem } from '@/chat/outline'
 import { getConversationMessageAnchorId } from '@/chat/outline'
 import { HappyChatProvider } from '@/components/AssistantChat/context'
@@ -30,6 +30,7 @@ const AUTO_SCROLL_RESUME_THRESHOLD_PX = 120
 const MANUAL_SCROLL_EPSILON_PX = 1
 const INITIAL_SCROLL_SETTLE_MS = 1800
 const INITIAL_SCROLL_SETTLE_DELAYS_MS = [0, 16, 50, 120, 250, 500, 900, 1400, 1800] as const
+const OUTLINE_PAGE_AUTO_OLDER_SUPPRESS_MS = 1500
 
 type ScrollIntent = {
     distanceFromBottom: number
@@ -42,6 +43,12 @@ type LocateOutlineTargetOptions = {
     findTarget: (anchorId: string) => HTMLElement | null
     hasMoreMessages: () => boolean
     loadOlderPreservingScroll: () => Promise<boolean>
+}
+
+function waitForAnimationFrame(): Promise<void> {
+    return new Promise((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+    })
 }
 
 export function getScrollIntent(params: {
@@ -151,13 +158,18 @@ const THREAD_MESSAGE_COMPONENTS = {
 export function ConversationOutlinePanel(props: {
     title: string
     items: readonly ConversationOutlineItem[]
+    pages?: readonly MessageStagePageSummary[]
+    activePage?: number | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
     onLoadMore: () => void
+    onPageSelect?: (page: number) => void
     onSelect: (item: ConversationOutlineItem) => void
     onClose: () => void
 }) {
     const { t } = useTranslation()
+    const activePage = props.activePage ?? null
+    const selectedPage = activePage !== null ? `${activePage}` : ''
 
     return (
         <aside
@@ -179,6 +191,42 @@ export function ConversationOutlinePanel(props: {
                     <CloseIcon className="h-4 w-4" />
                 </button>
             </div>
+
+            {props.pages && props.pages.length > 0 && props.onPageSelect ? (
+                <div className="border-b border-[var(--app-border)] p-3">
+                    <label className="mb-1 block text-[11px] font-medium uppercase text-[var(--app-hint)]">
+                        {t('session.outline.pageLabel')}
+                    </label>
+                    <select
+                        value={selectedPage}
+                        onChange={(event) => {
+                            const page = Number(event.target.value)
+                            if (Number.isFinite(page)) {
+                                props.onPageSelect?.(page)
+                            }
+                        }}
+                        className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]"
+                        aria-label={t('session.outline.pageLabel')}
+                    >
+                        {activePage === null ? (
+                            <option value="">{t('session.outline.currentWindow')}</option>
+                        ) : null}
+                        {props.pages.map((page) => (
+                            <option key={page.page} value={page.page}>
+                                {t('session.outline.pageOption', { page: page.page })} · {page.displayTitle}
+                            </option>
+                        ))}
+                    </select>
+                    {activePage !== null ? (
+                        <div className="mt-1 text-xs text-[var(--app-hint)]">
+                            {t('session.outline.pageStatus', {
+                                page: activePage,
+                                total: props.pages.length
+                            })}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
 
             {props.hasMoreMessages ? (
                 <div className="border-b border-[var(--app-border)] p-3">
@@ -261,7 +309,10 @@ export function HappyThread(props: {
     outlineOpen: boolean
     outlineTitle: string
     outlineItems: readonly ConversationOutlineItem[]
+    outlinePages?: readonly MessageStagePageSummary[]
+    activeOutlinePage?: number | null
     onOutlineOpenChange: (open: boolean) => void
+    onOutlinePageSelect?: (page: number) => Promise<unknown> | unknown
     onOutlineItemClick?: (item: ConversationOutlineItem) => void
 }) {
     const { t } = useTranslation()
@@ -291,6 +342,7 @@ export function HappyThread(props: {
     const initialScrollSessionRef = useRef<string | null>(null)
     const initialScrollDeadlineRef = useRef(0)
     const initialScrollTimersRef = useRef<number[]>([])
+    const suppressAutoOlderUntilRef = useRef(0)
 
     // Smart scroll state: enabled only while the user is intentionally at the bottom.
     const autoScrollEnabledRef = useRef(true)
@@ -446,6 +498,7 @@ export function HappyThread(props: {
         loadStartedRef.current = false
         initialScrollSessionRef.current = null
         initialScrollDeadlineRef.current = 0
+        suppressAutoOlderUntilRef.current = 0
         clearInitialScrollTimers()
         settlePendingLoad(false)
     }, [props.sessionId, clearInitialScrollTimers, settlePendingLoad])
@@ -559,7 +612,38 @@ export function HappyThread(props: {
         return loadPromise
     }, [isInitialScrollSettling, settlePendingLoad])
 
+    const loadOutlinePage = useCallback(async (page: number, options: { scrollTop: boolean }) => {
+        autoScrollEnabledRef.current = false
+        if (atBottomRef.current) {
+            atBottomRef.current = false
+            onAtBottomChangeRef.current(false)
+        }
+        await props.onOutlinePageSelect?.(page)
+        suppressAutoOlderUntilRef.current = Date.now() + OUTLINE_PAGE_AUTO_OLDER_SUPPRESS_MS
+        if (!options.scrollTop) {
+            return
+        }
+        await waitForAnimationFrame()
+        const viewport = viewportRef.current
+        if (!viewport) {
+            return
+        }
+        viewport.scrollTo({ top: 0, behavior: 'auto' })
+        lastScrollTopRef.current = viewport.scrollTop
+    }, [props.onOutlinePageSelect])
+
+    const handleOutlinePageSelect = useCallback(async (page: number) => {
+        await loadOutlinePage(page, { scrollTop: true })
+    }, [loadOutlinePage])
+
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        if (item.stagePage) {
+            const anchorId = getConversationMessageAnchorId(item.targetMessageId)
+            if (!document.getElementById(anchorId)) {
+                await loadOutlinePage(item.stagePage, { scrollTop: false })
+                await waitForAnimationFrame()
+            }
+        }
         const target = await locateOutlineTargetMessage({
             targetMessageId: item.targetMessageId,
             findTarget: (anchorId) => document.getElementById(anchorId),
@@ -572,7 +656,12 @@ export function HappyThread(props: {
         }
         props.onOutlineItemClick?.(item)
         props.onOutlineOpenChange(false)
-    }, [loadOlderPreservingScroll, props.onOutlineItemClick, props.onOutlineOpenChange])
+    }, [
+        loadOlderPreservingScroll,
+        props.onOutlineItemClick,
+        props.onOutlineOpenChange,
+        loadOutlinePage
+    ])
 
     useEffect(() => {
         handleLoadMoreRef.current = () => {
@@ -594,6 +683,9 @@ export function HappyThread(props: {
             (entries) => {
                 for (const entry of entries) {
                     if (entry.isIntersecting) {
+                        if (Date.now() < suppressAutoOlderUntilRef.current) {
+                            continue
+                        }
                         if (isInitialScrollSettling()) {
                             continue
                         }
@@ -761,10 +853,15 @@ export function HappyThread(props: {
                         <ConversationOutlinePanel
                             title={props.outlineTitle}
                             items={props.outlineItems}
+                            pages={props.outlinePages}
+                            activePage={props.activeOutlinePage}
                             hasMoreMessages={props.hasMoreMessages}
                             isLoadingMoreMessages={props.isLoadingMoreMessages}
                             onLoadMore={() => {
                                 void loadOlderPreservingScroll()
+                            }}
+                            onPageSelect={(page) => {
+                                void handleOutlinePageSelect(page)
                             }}
                             onSelect={handleOutlineSelect}
                             onClose={() => props.onOutlineOpenChange(false)}

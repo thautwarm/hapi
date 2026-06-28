@@ -1,4 +1,5 @@
 import type { ChatBlock, UserTextBlock } from '@/chat/types'
+import type { MessageStageSummary } from '@/types/api'
 
 export type ConversationOutlineItem = {
     id: string
@@ -6,6 +7,8 @@ export type ConversationOutlineItem = {
     kind: 'user'
     label: string
     createdAt: number
+    stageId?: string
+    stagePage?: number
 }
 
 const MAX_OUTLINE_LABEL_LENGTH = 96
@@ -48,6 +51,20 @@ export function buildConversationOutline(blocks: readonly ChatBlock[]): Conversa
     }
 
     return items
+}
+
+export function buildConversationOutlineFromStages(stages: readonly MessageStageSummary[]): ConversationOutlineItem[] {
+    return stages
+        .filter((stage) => stage.targetMessageId !== null)
+        .map((stage) => ({
+            id: `outline:${stage.id}`,
+            targetMessageId: stage.targetMessageId!,
+            kind: 'user',
+            label: stage.displayTitle,
+            createdAt: stage.startAt,
+            stageId: stage.id,
+            stagePage: stage.page
+        }))
 }
 
 export function getConversationMessageAnchorId(messageId: string): string {

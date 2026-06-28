@@ -3,6 +3,7 @@ import {
     SESSION_EXPORT_MESSAGE_LIMIT,
     type HapiSessionExportResult
 } from '@hapi/protocol/sessionExport'
+import type { MessageStagePageSummary, MessageStageSummary, MessageStagesResponse, MessagesResponse } from '@hapi/protocol/apiTypes'
 import type { AttachmentMetadata, DecryptedMessage, Session } from '@hapi/protocol/types'
 import {
     isClaudeChatVisibleMessage,
@@ -16,6 +17,18 @@ import type { Store, CancelQueuedMessageResult } from '../store'
 import { EventPublisher } from './eventPublisher'
 
 type StoredMessageForDelivery = ReturnType<Store['messages']['getMessages']>[number]
+
+type InternalMessageStage = MessageStageSummary & {
+    endExclusiveSeq: number | null
+    endExclusiveAt: number | null
+}
+
+type InternalMessageStagesResponse = Omit<MessageStagesResponse, 'stages'> & {
+    stages: InternalMessageStage[]
+}
+
+const DEFAULT_MESSAGE_STAGES_PER_PAGE = 8
+const MAX_STAGE_TITLE_LENGTH = 96
 
 function isWebVisibleStoredMessage(message: StoredMessageForDelivery): boolean {
     return !isRedundantGoalStatusEventContent(message.content)
@@ -35,6 +48,99 @@ function toDecryptedMessage(message: StoredMessageForDelivery): DecryptedMessage
 
 function toVisibleDecryptedMessages(messages: StoredMessageForDelivery[]): DecryptedMessage[] {
     return messages.filter(isWebVisibleStoredMessage).map(toDecryptedMessage)
+}
+
+function getMessagePositionAt(message: StoredMessageForDelivery): number {
+    return message.invokedAt ?? message.createdAt
+}
+
+function compareStoredMessagesByPosition(a: StoredMessageForDelivery, b: StoredMessageForDelivery): number {
+    const at = getMessagePositionAt(a) - getMessagePositionAt(b)
+    return at !== 0 ? at : a.seq - b.seq
+}
+
+function normalizeStageTitle(value: string): string | null {
+    const normalized = value.replace(/\s+/g, ' ').trim()
+    if (normalized.length === 0) {
+        return null
+    }
+    if (normalized.length <= MAX_STAGE_TITLE_LENGTH) {
+        return normalized
+    }
+    return `${normalized.slice(0, MAX_STAGE_TITLE_LENGTH - 3).trimEnd()}...`
+}
+
+function extractUserMessageText(content: unknown): string | null {
+    if (typeof content === 'string') {
+        return normalizeStageTitle(content)
+    }
+
+    if (Array.isArray(content)) {
+        const text = content
+            .map((item) => {
+                if (!isObject(item) || item.type !== 'text' || typeof item.text !== 'string') {
+                    return null
+                }
+                return item.text
+            })
+            .filter((value): value is string => value !== null)
+            .join(' ')
+        return normalizeStageTitle(text)
+    }
+
+    if (isObject(content) && content.type === 'text' && typeof content.text === 'string') {
+        return normalizeStageTitle(content.text)
+    }
+
+    return null
+}
+
+function extractUserStageTitle(message: StoredMessageForDelivery): string | null {
+    const record = unwrapRoleWrappedRecordEnvelope(message.content)
+    if (record?.role !== 'user') {
+        return null
+    }
+    return extractUserMessageText(record.content) ?? 'User message'
+}
+
+function normalizeStagesPerPage(value: number | undefined): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return DEFAULT_MESSAGE_STAGES_PER_PAGE
+    }
+    return Math.max(1, Math.min(50, Math.trunc(value)))
+}
+
+function makePageSummaries(stages: readonly InternalMessageStage[]): MessageStagePageSummary[] {
+    const byPage = new Map<number, InternalMessageStage[]>()
+    for (const stage of stages) {
+        const pageStages = byPage.get(stage.page) ?? []
+        pageStages.push(stage)
+        byPage.set(stage.page, pageStages)
+    }
+
+    return Array.from(byPage.entries())
+        .sort(([left], [right]) => left - right)
+        .map(([page, pageStages]) => ({
+            page,
+            displayTitle: pageStages[0]?.displayTitle ?? `Page ${page}`,
+            stageIds: pageStages.map((stage) => stage.id),
+            messageCount: pageStages.reduce((sum, stage) => sum + stage.messageCount, 0)
+        }))
+}
+
+function toPublicStage(stage: InternalMessageStage): MessageStageSummary {
+    return {
+        id: stage.id,
+        displayTitle: stage.displayTitle,
+        page: stage.page,
+        startMessageId: stage.startMessageId,
+        targetMessageId: stage.targetMessageId,
+        startSeq: stage.startSeq,
+        startAt: stage.startAt,
+        endSeq: stage.endSeq,
+        endAt: stage.endAt,
+        messageCount: stage.messageCount
+    }
 }
 
 function isQueuedUserMessage(message: StoredMessageForDelivery): boolean {
@@ -89,6 +195,163 @@ export class MessageService {
     getMessages(sessionId: string, limit: number = 200): DecryptedMessage[] {
         const stored = this.store.messages.getMessages(sessionId, limit)
         return toVisibleDecryptedMessages(stored)
+    }
+
+    private buildMessageStages(
+        sessionId: string,
+        stagesPerPageInput?: number
+    ): InternalMessageStagesResponse {
+        const stagesPerPage = normalizeStagesPerPage(stagesPerPageInput)
+        const userRows = this.store.messages.getUserMessagesByPosition(sessionId)
+            .filter(isWebVisibleStoredMessage)
+            .filter((row) => extractUserStageTitle(row) !== null)
+            .sort(compareStoredMessagesByPosition)
+
+        const firstVisible = this.store.messages.getFirstMessagesByPosition(sessionId, 500)
+            .filter(isWebVisibleStoredMessage)[0] ?? null
+        const starts = [...userRows]
+        if (
+            firstVisible
+            && (
+                starts.length === 0
+                || compareStoredMessagesByPosition(firstVisible, starts[0]) < 0
+            )
+        ) {
+            starts.unshift(firstVisible)
+        }
+        const stages: InternalMessageStage[] = []
+
+        for (let index = 0; index < starts.length; index += 1) {
+            const row = starts[index]
+            const next = starts[index + 1] ?? null
+            const start = { at: getMessagePositionAt(row), seq: row.seq }
+            const endExclusive = next
+                ? { at: getMessagePositionAt(next), seq: next.seq }
+                : null
+            const title = extractUserStageTitle(row)
+            const last = this.store.messages.getLastMessageByPositionRange(sessionId, start, endExclusive)
+            if (!last) {
+                continue
+            }
+            const messageCount = this.store.messages.countMessagesByPositionRange(sessionId, start, endExclusive)
+            stages.push({
+                id: title !== null ? `stage:${row.id}` : `stage:intro:${row.id}`,
+                displayTitle: title ?? 'Session start',
+                page: Math.floor(stages.length / stagesPerPage) + 1,
+                startMessageId: row.id,
+                targetMessageId: title !== null ? `user-text:${row.id}` : null,
+                startSeq: row.seq,
+                startAt: start.at,
+                endSeq: last.seq,
+                endAt: getMessagePositionAt(last),
+                endExclusiveSeq: endExclusive?.seq ?? null,
+                endExclusiveAt: endExclusive?.at ?? null,
+                messageCount
+            })
+        }
+
+        const pages = makePageSummaries(stages)
+        return {
+            stagesPerPage,
+            totalStages: stages.length,
+            totalPages: Math.ceil(stages.length / stagesPerPage),
+            stages,
+            pages
+        }
+    }
+
+    getMessageStages(
+        sessionId: string,
+        options: { stagesPerPage?: number } = {}
+    ): MessageStagesResponse {
+        const { stages, ...rest } = this.buildMessageStages(sessionId, options.stagesPerPage)
+        return {
+            ...rest,
+            stages: stages.map(toPublicStage)
+        }
+    }
+
+    getMessagesStagePage(
+        sessionId: string,
+        options: { stagePage: number; stagesPerPage?: number }
+    ): MessagesResponse {
+        const { stages, pages, stagesPerPage, totalPages, totalStages } = this.buildMessageStages(
+            sessionId,
+            options.stagesPerPage
+        )
+        if (totalStages === 0) {
+            return {
+                messages: [],
+                page: {
+                    limit: 0,
+                    nextBeforeSeq: null,
+                    nextBeforeAt: null,
+                    hasMore: false,
+                    stagePage: {
+                        currentPage: 0,
+                        totalPages: 0,
+                        stagesPerPage,
+                        stageIds: [],
+                        stages: [],
+                        messageStageIds: {}
+                    }
+                }
+            }
+        }
+
+        const requestedPage = Number.isFinite(options.stagePage)
+            ? Math.trunc(options.stagePage)
+            : totalPages
+        const currentPage = Math.max(1, Math.min(totalPages, requestedPage))
+        const pageStages = stages.filter((stage) => stage.page === currentPage)
+        const firstStage = pageStages[0] ?? null
+        const lastStage = pageStages[pageStages.length - 1] ?? null
+        const endExclusive = lastStage && lastStage.endExclusiveAt !== null && lastStage.endExclusiveSeq !== null
+            ? { at: lastStage.endExclusiveAt, seq: lastStage.endExclusiveSeq }
+            : null
+        const rows = firstStage
+            ? this.store.messages.getMessagesByPositionRange(
+                sessionId,
+                { at: firstStage.startAt, seq: firstStage.startSeq },
+                endExclusive
+            ).filter(isWebVisibleStoredMessage).sort(compareStoredMessagesByPosition)
+            : []
+        const messageStageIds: Record<string, string> = {}
+        for (const row of rows) {
+            const rowAt = getMessagePositionAt(row)
+            const stage = pageStages.find((candidate) => {
+                if (rowAt < candidate.startAt || (rowAt === candidate.startAt && row.seq < candidate.startSeq)) {
+                    return false
+                }
+                if (candidate.endExclusiveAt === null || candidate.endExclusiveSeq === null) {
+                    return true
+                }
+                return rowAt < candidate.endExclusiveAt
+                    || (rowAt === candidate.endExclusiveAt && row.seq < candidate.endExclusiveSeq)
+            })
+            if (stage) {
+                messageStageIds[row.id] = stage.id
+            }
+        }
+        const oldest = rows[0] ?? null
+
+        return {
+            messages: toVisibleDecryptedMessages(rows),
+            page: {
+                limit: rows.length,
+                nextBeforeSeq: oldest?.seq ?? null,
+                nextBeforeAt: oldest ? getMessagePositionAt(oldest) : null,
+                hasMore: currentPage > 1,
+                stagePage: {
+                    currentPage,
+                    totalPages: pages.length,
+                    stagesPerPage,
+                    stageIds: pageStages.map((stage) => stage.id),
+                    stages: pageStages.map(toPublicStage),
+                    messageStageIds
+                }
+            }
+        }
     }
 
     getSessionExport(

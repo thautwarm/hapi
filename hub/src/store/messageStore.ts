@@ -9,7 +9,12 @@ import {
     getMessages,
     getFirstMessages,
     getDeliverableMessagesAfter,
+    countMessagesByPositionRange,
+    getFirstMessagesByPosition,
     getMessagesByPosition,
+    getMessagesByPositionRange,
+    getLastMessageByPositionRange,
+    getUserMessagesByPosition,
     getUninvokedLocalMessages,
     getMatureScheduledMessages,
     getImmediateQueuedLocalMessages,
@@ -62,6 +67,38 @@ export class MessageStore {
 
     getMessagesByPosition(sessionId: string, limit: number, before?: { at: number; seq: number }): StoredMessage[] {
         return getMessagesByPosition(this.db, sessionId, limit, before)
+    }
+
+    getFirstMessagesByPosition(sessionId: string, limit: number = 50): StoredMessage[] {
+        return getFirstMessagesByPosition(this.db, sessionId, limit)
+    }
+
+    getUserMessagesByPosition(sessionId: string): StoredMessage[] {
+        return getUserMessagesByPosition(this.db, sessionId)
+    }
+
+    getMessagesByPositionRange(
+        sessionId: string,
+        start: { at: number; seq: number },
+        end?: { at: number; seq: number } | null
+    ): StoredMessage[] {
+        return getMessagesByPositionRange(this.db, sessionId, start, end)
+    }
+
+    getLastMessageByPositionRange(
+        sessionId: string,
+        start: { at: number; seq: number },
+        end?: { at: number; seq: number } | null
+    ): StoredMessage | null {
+        return getLastMessageByPositionRange(this.db, sessionId, start, end)
+    }
+
+    countMessagesByPositionRange(
+        sessionId: string,
+        start: { at: number; seq: number },
+        end?: { at: number; seq: number } | null
+    ): number {
+        return countMessagesByPositionRange(this.db, sessionId, start, end)
     }
 
     getUninvokedLocalMessages(sessionId: string): StoredMessage[] {

@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { MessagesQuerySchema, SendMessageRequestSchema } from '@hapi/protocol'
+import { MessageStagesQuerySchema, MessagesQuerySchema, SendMessageRequestSchema } from '@hapi/protocol'
 import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireSessionFromParam, requireSyncEngine } from './guards'
@@ -24,11 +24,40 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Invalid query', issues: parsed.error.flatten() }, 400)
         }
 
+        if (parsed.data.stagePage !== undefined) {
+            return c.json(engine.getMessagesStagePage(sessionId, {
+                stagePage: parsed.data.stagePage,
+                stagesPerPage: parsed.data.stagesPerPage
+            }))
+        }
+
         const limit = parsed.data.limit ?? 50
         const before = parsed.data.beforeAt !== undefined && parsed.data.beforeSeq !== undefined
             ? { at: parsed.data.beforeAt, seq: parsed.data.beforeSeq }
             : null
         return c.json(engine.getMessagesPage(sessionId, { limit, before }))
+    })
+
+    app.get('/sessions/:id/message-stages', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const sessionId = sessionResult.sessionId
+
+        const parsed = MessageStagesQuerySchema.safeParse(c.req.query())
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid query', issues: parsed.error.flatten() }, 400)
+        }
+
+        return c.json(engine.getMessageStages(sessionId, {
+            stagesPerPage: parsed.data.stagesPerPage
+        }))
     })
 
     app.delete('/sessions/:id/messages/:messageId', async (c) => {

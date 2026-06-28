@@ -10,6 +10,7 @@ import type {
     CodexCollaborationMode,
     FileSearchResponse,
     MachinesResponse,
+    MessageStagesResponse,
     MessagesResponse,
     PermissionMode,
     PushSubscriptionPayload,
@@ -271,6 +272,8 @@ export class ApiClient {
             beforeSeq?: number | null
             beforeAt?: number | null
             limit?: number
+            stagePage?: number | null
+            stagesPerPage?: number | null
         }
     ): Promise<MessagesResponse> {
         const params = new URLSearchParams()
@@ -283,10 +286,29 @@ export class ApiClient {
         if (options.limit !== undefined && options.limit !== null) {
             params.set('limit', `${options.limit}`)
         }
+        if (options.stagePage !== undefined && options.stagePage !== null) {
+            params.set('stagePage', `${options.stagePage}`)
+        }
+        if (options.stagesPerPage !== undefined && options.stagesPerPage !== null) {
+            params.set('stagesPerPage', `${options.stagesPerPage}`)
+        }
 
         const qs = params.toString()
         const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`
         return await this.request<MessagesResponse>(url)
+    }
+
+    async getMessageStages(
+        sessionId: string,
+        options: { stagesPerPage?: number } = {}
+    ): Promise<MessageStagesResponse> {
+        const params = new URLSearchParams()
+        if (options.stagesPerPage !== undefined) {
+            params.set('stagesPerPage', `${options.stagesPerPage}`)
+        }
+        const qs = params.toString()
+        const url = `/api/sessions/${encodeURIComponent(sessionId)}/message-stages${qs ? `?${qs}` : ''}`
+        return await this.request<MessageStagesResponse>(url)
     }
 
     async getGitStatus(sessionId: string): Promise<GitCommandResponse> {

@@ -78,6 +78,25 @@ describe('ConversationOutlinePanel', () => {
         expect(onLoadMore).toHaveBeenCalledTimes(1)
     })
 
+    it('renders stage pages and selects a page', () => {
+        const onPageSelect = vi.fn()
+        renderPanel({
+            activePage: 2,
+            onPageSelect,
+            pages: [
+                { page: 1, displayTitle: 'Session start', stageIds: ['stage:intro'], messageCount: 1 },
+                { page: 2, displayTitle: 'Implement the panel', stageIds: ['stage:panel'], messageCount: 4 }
+            ]
+        })
+
+        fireEvent.change(screen.getByRole('combobox', { name: 'Page' }), {
+            target: { value: '1' }
+        })
+
+        expect(screen.getByText('Page 2 of 2')).toBeInTheDocument()
+        expect(onPageSelect).toHaveBeenCalledWith(1)
+    })
+
     it('renders an empty state', () => {
         renderPanel({ items: [] })
 

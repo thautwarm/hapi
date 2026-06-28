@@ -305,6 +305,66 @@ describe('MessageService message pagination', () => {
         expect(page.page.nextBeforeSeq).toBe(invoked.seq)
         expect(page.page.hasMore).toBe(true)
     })
+
+    it('builds logical stage pages from user-message titles', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'stage-outline')
+        const intro = store.messages.addMessage(session.id, { role: 'agent', content: 'Boot' })
+        const first = store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Implement the panel' } })
+        const firstReply = store.messages.addMessage(session.id, { role: 'agent', content: 'Done' })
+        const second = store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Run tests' } })
+
+        const stages = makeService(store).getMessageStages(session.id, { stagesPerPage: 1 })
+
+        expect(stages.totalStages).toBe(3)
+        expect(stages.totalPages).toBe(3)
+        expect(stages.stages.map((stage) => stage.displayTitle)).toEqual([
+            'Session start',
+            'Implement the panel',
+            'Run tests'
+        ])
+        expect(stages.stages.map((stage) => stage.page)).toEqual([1, 2, 3])
+        expect(stages.stages[1]?.targetMessageId).toBe(`user-text:${first.id}`)
+        expect(stages.pages.map((page) => page.messageCount)).toEqual([1, 2, 1])
+        expect([intro.id, firstReply.id, second.id]).toHaveLength(3)
+    })
+
+    it('loads a logical stage page with all messages in that stage', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'stage-page')
+        store.messages.addMessage(session.id, { role: 'agent', content: 'Boot' })
+        const first = store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Implement the panel' } })
+        const firstReply = store.messages.addMessage(session.id, { role: 'agent', content: 'Done' })
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Run tests' } })
+
+        const page = makeService(store).getMessagesStagePage(session.id, { stagePage: 2, stagesPerPage: 1 })
+
+        expect(page.messages.map((message) => message.id)).toEqual([first.id, firstReply.id])
+        expect(page.page.hasMore).toBe(true)
+        expect(page.page.nextBeforeSeq).toBe(first.seq)
+        expect(page.page.stagePage).toEqual({
+            currentPage: 2,
+            totalPages: 3,
+            stagesPerPage: 1,
+            stageIds: [`stage:${first.id}`],
+            stages: [{
+                id: `stage:${first.id}`,
+                displayTitle: 'Implement the panel',
+                page: 2,
+                startMessageId: first.id,
+                targetMessageId: `user-text:${first.id}`,
+                startSeq: first.seq,
+                startAt: first.invokedAt ?? first.createdAt,
+                endSeq: firstReply.seq,
+                endAt: firstReply.invokedAt ?? firstReply.createdAt,
+                messageCount: 2
+            }],
+            messageStageIds: {
+                [first.id]: `stage:${first.id}`,
+                [firstReply.id]: `stage:${first.id}`
+            }
+        })
+    })
 })
 
 describe('MessageService.cancelQueuedMessage race scenarios', () => {

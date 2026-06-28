@@ -894,10 +894,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               page: await getCodexSessionImportPage(params)
             };
           case 'opencode':
-            return {
-              success: true,
-              page: await getOpencodeSessionImportPage(params)
-            };
+            {
+              const cachedSummary = importableSessionsCache.get('opencode')?.sessions
+                .find((session) => session.id === params.sessionId);
+              return {
+                success: true,
+                page: await getOpencodeSessionImportPage(params, { summary: cachedSummary })
+              };
+            }
         }
       } catch (error) {
         logger.debug(`[RUNNER RUN] Failed to load ${params.flavor} session page for import`, error);

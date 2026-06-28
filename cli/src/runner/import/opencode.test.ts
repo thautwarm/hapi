@@ -63,6 +63,35 @@ async function writeFileStorageSession(sessionId: string, cwd: string): Promise<
     })
 }
 
+async function writeToolFileStorageSession(sessionId: string, cwd: string): Promise<void> {
+    const storage = join(tmpRoot, 'opencode', 'storage')
+    await writeJson(join(storage, 'session', 'default', `${sessionId}.json`), {
+        id: sessionId,
+        directory: cwd,
+        time: { created: 1_780_000_000_000, updated: 1_780_000_000_100 }
+    })
+    await writeJson(join(storage, 'message', sessionId, 'm1.json'), {
+        id: 'm1',
+        sessionID: sessionId,
+        role: 'assistant',
+        time: { created: 1_780_000_000_000 }
+    })
+    await writeJson(join(storage, 'part', 'm1', 'p1.json'), {
+        id: 'p1',
+        type: 'tool',
+        messageID: 'm1',
+        sessionID: sessionId,
+        tool: 'bash',
+        callID: 'call-1',
+        state: {
+            status: 'completed',
+            input: { command: 'echo hi' },
+            output: 'hi'
+        },
+        time: { created: 1_780_000_000_000 }
+    })
+}
+
 describe('OpenCode runner import', () => {
     beforeEach(async () => {
         originalXdgDataHome = process.env.XDG_DATA_HOME
@@ -107,6 +136,21 @@ describe('OpenCode runner import', () => {
         expect(second.messages.map((message) => message.message.role)).toEqual(['user', 'agent'])
         expect(second.messages[0].message.content).toEqual({ type: 'text', text: 'continue' })
         expect(new Set([first.messages[0].sourceKey, second.messages[0].sourceKey]).size).toBe(2)
+        expect(second.done).toBe(true)
+    })
+
+    it('splits multi-message OpenCode parts across pages without duplicating them', async () => {
+        await writeToolFileStorageSession('opencode-tool', '/repo/app')
+
+        const first = await getOpencodeSessionImportPage({ flavor: 'opencode', sessionId: 'opencode-tool', limit: 1 })
+        expect(first.messages).toHaveLength(1)
+        expect((first.messages[0].message.content as { data?: { type?: string } }).data?.type).toBe('tool-call')
+        expect(first.done).toBe(false)
+        expect(first.nextCursor).toBeTruthy()
+
+        const second = await getOpencodeSessionImportPage({ flavor: 'opencode', sessionId: 'opencode-tool', cursor: first.nextCursor ?? undefined, limit: 1 })
+        expect(second.messages).toHaveLength(1)
+        expect((second.messages[0].message.content as { data?: { type?: string } }).data?.type).toBe('tool-call-result')
         expect(second.done).toBe(true)
     })
 })

@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/lib/use-translation'
 
 const ALL_WORKDIR_FILTER = '__all__'
+const SESSION_LIST_PAGE_SIZE = 25
 
 function formatTime(value: number): string | null {
     if (!Number.isFinite(value)) return null
@@ -76,6 +77,7 @@ export function RunnerSessionImportDialog(props: {
     const { t } = useTranslation()
     const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([])
     const [workdirFilter, setWorkdirFilter] = useState(ALL_WORKDIR_FILTER)
+    const [pageIndex, setPageIndex] = useState(0)
     const wasOpenRef = useRef(false)
 
     const selectedSessionIdSet = useMemo(() => new Set(selectedSessionIds), [selectedSessionIds])
@@ -91,6 +93,11 @@ export function RunnerSessionImportDialog(props: {
         if (workdirFilter === ALL_WORKDIR_FILTER) return sessions
         return sessions.filter((session) => getSessionCwd(session) === workdirFilter)
     }, [sessions, workdirFilter])
+    const totalPages = Math.max(1, Math.ceil(filteredSessions.length / SESSION_LIST_PAGE_SIZE))
+    const pageSessions = useMemo(() => {
+        const start = pageIndex * SESSION_LIST_PAGE_SIZE
+        return filteredSessions.slice(start, start + SESSION_LIST_PAGE_SIZE)
+    }, [filteredSessions, pageIndex])
     const failureBySessionId = useMemo(() => {
         const map = new Map<string, string>()
         for (const failure of failures) {
@@ -108,6 +115,7 @@ export function RunnerSessionImportDialog(props: {
             wasOpenRef.current = true
             setSelectedSessionIds([])
             setWorkdirFilter(ALL_WORKDIR_FILTER)
+            setPageIndex(0)
             return
         }
 
@@ -115,6 +123,7 @@ export function RunnerSessionImportDialog(props: {
             wasOpenRef.current = false
             setSelectedSessionIds([])
             setWorkdirFilter(ALL_WORKDIR_FILTER)
+            setPageIndex(0)
         }
     }, [isOpen])
 
@@ -127,6 +136,14 @@ export function RunnerSessionImportDialog(props: {
         if (workdirOptions.includes(workdirFilter)) return
         setWorkdirFilter(ALL_WORKDIR_FILTER)
     }, [workdirFilter, workdirOptions])
+
+    useEffect(() => {
+        setPageIndex(0)
+    }, [selectedMachineId, selectedFlavor, workdirFilter, sessions])
+
+    useEffect(() => {
+        setPageIndex((current) => Math.min(current, totalPages - 1))
+    }, [totalPages])
 
     const toggleSession = (sessionId: string) => {
         if (isPending || isLoading) return
@@ -256,6 +273,54 @@ export function RunnerSessionImportDialog(props: {
                         </label>
                     ) : null}
 
+                    {filteredSessions.length > SESSION_LIST_PAGE_SIZE ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-subtle-bg)] px-3 py-2 text-xs text-[var(--app-hint)]">
+                            <div>
+                                {t('runnerImport.dialog.pageStatus', {
+                                    page: pageIndex + 1,
+                                    pages: totalPages,
+                                    total: filteredSessions.length
+                                })}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+                                    disabled={isPending || isLoading || pageIndex === 0}
+                                >
+                                    {t('runnerImport.dialog.previousPage')}
+                                </Button>
+                                <label className="flex items-center gap-1">
+                                    <span>{t('runnerImport.dialog.pageInput')}</span>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={totalPages}
+                                        value={pageIndex + 1}
+                                        disabled={isPending || isLoading}
+                                        onChange={(event) => {
+                                            const next = Number.parseInt(event.target.value, 10)
+                                            if (!Number.isFinite(next)) return
+                                            setPageIndex(Math.min(totalPages - 1, Math.max(0, next - 1)))
+                                        }}
+                                        className="h-7 w-16 rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 text-xs text-[var(--app-fg)] outline-none focus:ring-2 focus:ring-[var(--app-link)]"
+                                    />
+                                </label>
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setPageIndex((current) => Math.min(totalPages - 1, current + 1))}
+                                    disabled={isPending || isLoading || pageIndex >= totalPages - 1}
+                                >
+                                    {t('runnerImport.dialog.nextPage')}
+                                </Button>
+                            </div>
+                        </div>
+                    ) : null}
+
                     {failedImportResults.length > 0 ? (
                         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-600">
                             <div className="font-medium">{t('runnerImport.dialog.failuresTitle')}</div>
@@ -289,7 +354,7 @@ export function RunnerSessionImportDialog(props: {
                             </div>
                         ) : (
                             <div className="divide-y divide-[var(--app-border)]">
-                                {filteredSessions.map((session) => {
+                                {pageSessions.map((session) => {
                                     const checked = selectedSessionIdSet.has(session.id)
                                     const cwd = getSessionCwd(session)
                                     const time = formatTime(session.modifiedAt)

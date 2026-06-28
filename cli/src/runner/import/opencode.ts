@@ -21,6 +21,7 @@ type StorageSource = 'database' | 'files'
 
 type OpencodeImportOptions = {
     maxFiles?: number
+    summary?: RunnerImportableSessionSummary
 }
 
 type DbSessionRow = {
@@ -50,6 +51,7 @@ type DbPartRow = {
 type SqliteStatement = {
     all: (...params: unknown[]) => unknown[]
     get: (...params: unknown[]) => unknown
+    iterate: (...params: unknown[]) => IterableIterator<unknown>
 }
 
 type SqliteDatabase = {
@@ -68,15 +70,15 @@ type OpencodeSessionCandidate = {
 
 type OpencodeLoadedSession = {
     summary: RunnerImportableSessionSummary
-    messages: RunnerImportedSessionMessage[]
     source: StorageSource
+    totalMessages: number
+    totalParts?: number
+    messageFileCount?: number
 }
 
-type OpencodeImportCursor = {
+type OpencodeImportCursorBase = {
     v: 1
     sessionId: string
-    source: StorageSource
-    afterSourceKey: string | null
     totalMessages: number
     title: string
     cwd: string | null
@@ -84,6 +86,22 @@ type OpencodeImportCursor = {
     modifiedAt: number
     byteSize: number
 }
+
+type OpencodeImportCursor = OpencodeImportCursorBase & (
+    | {
+        source: 'database'
+        nextPartOffset: number
+        nextMessageOffset: number
+        totalParts: number
+    }
+    | {
+        source: 'files'
+        nextMessageIndex: number
+        nextPartIndex: number
+        nextPartMessageOffset: number
+        messageFileCount: number
+    }
+)
 
 type ParsedSessionInfo = {
     id: string | null
@@ -126,22 +144,20 @@ function decodeCursor(value: string): OpencodeImportCursor | null {
     try {
         const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
         const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), '=')
-        const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as Partial<OpencodeImportCursor>
+        const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as Record<string, unknown>
         if (parsed.v !== 1) return null
         if (typeof parsed.sessionId !== 'string' || !parsed.sessionId) return null
         if (parsed.source !== 'database' && parsed.source !== 'files') return null
-        if (parsed.afterSourceKey !== null && typeof parsed.afterSourceKey !== 'string') return null
         if (typeof parsed.totalMessages !== 'number' || !Number.isInteger(parsed.totalMessages) || parsed.totalMessages < 0) return null
         if (typeof parsed.title !== 'string' || !parsed.title) return null
         if (parsed.cwd !== null && typeof parsed.cwd !== 'string') return null
         if (parsed.lastUserMessage !== null && typeof parsed.lastUserMessage !== 'string') return null
         if (typeof parsed.modifiedAt !== 'number' || !Number.isInteger(parsed.modifiedAt) || parsed.modifiedAt < 0) return null
         if (typeof parsed.byteSize !== 'number' || !Number.isInteger(parsed.byteSize) || parsed.byteSize < 0) return null
-        return {
+
+        const base: OpencodeImportCursorBase = {
             v: 1,
             sessionId: parsed.sessionId,
-            source: parsed.source,
-            afterSourceKey: parsed.afterSourceKey ?? null,
             totalMessages: parsed.totalMessages,
             title: parsed.title,
             cwd: parsed.cwd ?? null,
@@ -149,18 +165,75 @@ function decodeCursor(value: string): OpencodeImportCursor | null {
             modifiedAt: parsed.modifiedAt,
             byteSize: parsed.byteSize
         }
+
+        if (parsed.source === 'database') {
+            if (typeof parsed.nextPartOffset !== 'number' || !Number.isInteger(parsed.nextPartOffset) || parsed.nextPartOffset < 0) return null
+            if (typeof parsed.nextMessageOffset !== 'number' || !Number.isInteger(parsed.nextMessageOffset) || parsed.nextMessageOffset < 0) return null
+            if (typeof parsed.totalParts !== 'number' || !Number.isInteger(parsed.totalParts) || parsed.totalParts < 0) return null
+            return {
+                ...base,
+                source: 'database',
+                nextPartOffset: parsed.nextPartOffset,
+                nextMessageOffset: parsed.nextMessageOffset,
+                totalParts: parsed.totalParts
+            }
+        }
+
+        if (typeof parsed.nextMessageIndex !== 'number' || !Number.isInteger(parsed.nextMessageIndex) || parsed.nextMessageIndex < 0) return null
+        if (typeof parsed.nextPartIndex !== 'number' || !Number.isInteger(parsed.nextPartIndex) || parsed.nextPartIndex < 0) return null
+        if (typeof parsed.nextPartMessageOffset !== 'number' || !Number.isInteger(parsed.nextPartMessageOffset) || parsed.nextPartMessageOffset < 0) return null
+        if (typeof parsed.messageFileCount !== 'number' || !Number.isInteger(parsed.messageFileCount) || parsed.messageFileCount < 0) return null
+        return {
+            ...base,
+            source: 'files',
+            nextMessageIndex: parsed.nextMessageIndex,
+            nextPartIndex: parsed.nextPartIndex,
+            nextPartMessageOffset: parsed.nextPartMessageOffset,
+            messageFileCount: parsed.messageFileCount
+        }
     } catch {
         return null
     }
 }
 
-function cursorFromLoaded(loaded: OpencodeLoadedSession, afterSourceKey: string | null): string {
+function databaseCursorFromLoaded(
+    loaded: OpencodeLoadedSession,
+    nextPartOffset: number,
+    nextMessageOffset: number
+): string {
+    if (loaded.totalParts === undefined) throw new Error('Invalid OpenCode database import cursor')
     return encodeCursor({
         v: 1,
         sessionId: loaded.summary.id,
-        source: loaded.source,
-        afterSourceKey,
-        totalMessages: loaded.summary.messageCount ?? loaded.messages.length,
+        source: 'database',
+        nextPartOffset,
+        nextMessageOffset,
+        totalParts: loaded.totalParts,
+        totalMessages: loaded.totalMessages,
+        title: loaded.summary.title,
+        cwd: loaded.summary.cwd ?? null,
+        lastUserMessage: loaded.summary.lastUserMessage ?? null,
+        modifiedAt: loaded.summary.modifiedAt,
+        byteSize: loaded.summary.byteSize ?? 0
+    })
+}
+
+function fileCursorFromLoaded(
+    loaded: OpencodeLoadedSession,
+    nextMessageIndex: number,
+    nextPartIndex: number,
+    nextPartMessageOffset: number
+): string {
+    if (loaded.messageFileCount === undefined) throw new Error('Invalid OpenCode file import cursor')
+    return encodeCursor({
+        v: 1,
+        sessionId: loaded.summary.id,
+        source: 'files',
+        nextMessageIndex,
+        nextPartIndex,
+        nextPartMessageOffset,
+        messageFileCount: loaded.messageFileCount,
+        totalMessages: loaded.totalMessages,
         title: loaded.summary.title,
         cwd: loaded.summary.cwd ?? null,
         lastUserMessage: loaded.summary.lastUserMessage ?? null,
@@ -527,35 +600,201 @@ function convertPart(ctx: PartContext): RunnerImportedSessionMessage[] {
     return []
 }
 
-function buildLoadedSession(
-    candidate: OpencodeSessionCandidate,
+type OpencodeScanOptions = {
+    limit: number
+    startPartOffset: number
+    startMessageOffset: number
+    knownTotalMessages?: number
+    knownTotalParts?: number
+    summaryOverride?: RunnerImportableSessionSummary
+}
+
+type OpencodeDatabasePageResult = {
+    loaded: OpencodeLoadedSession
+    messages: RunnerImportedSessionMessage[]
+    nextPartOffset: number
+    nextMessageOffset: number
+    done: boolean
+}
+
+type OpencodeFilePageOptions = {
+    limit: number
+    nextMessageIndex: number
+    nextPartIndex: number
+    nextPartMessageOffset: number
+    knownTotalMessages?: number
+    knownMessageFileCount?: number
+    summaryOverride?: RunnerImportableSessionSummary
+}
+
+type OpencodeFilePageResult = {
+    loaded: OpencodeLoadedSession
+    messages: RunnerImportedSessionMessage[]
+    nextMessageIndex: number
+    nextPartIndex: number
+    nextPartMessageOffset: number
+    done: boolean
+}
+
+type PageCollectState = {
+    limit: number
+    messages: RunnerImportedSessionMessage[]
+    nextPartOffset: number
+    nextMessageOffset: number
+    sealed: boolean
+}
+
+type DbPartWithMessageRow = DbPartRow & {
+    message_data: string | null
+    message_time_created: number | null
+    message_time_updated: number | null
+}
+
+function makePageCollectState(options: OpencodeScanOptions): PageCollectState {
+    return {
+        limit: options.limit,
+        messages: [],
+        nextPartOffset: options.startPartOffset,
+        nextMessageOffset: options.startMessageOffset,
+        sealed: false
+    }
+}
+
+function appendMessagesToPage(
+    state: PageCollectState,
     messages: RunnerImportedSessionMessage[],
-    byteSize: number
-): OpencodeLoadedSession | null {
-    if (messages.length === 0) return null
-    let lastUserMessage: string | null = null
+    nextPartOffset: number,
+    nextMessageOffset: number
+): void {
+    if (state.sealed || messages.length === 0) return
+
+    const remaining = state.limit - state.messages.length
+    state.messages.push(...messages.slice(0, remaining))
+    if (messages.length > remaining) {
+        state.nextPartOffset = nextPartOffset - 1
+        state.nextMessageOffset = nextMessageOffset + remaining
+        state.sealed = true
+        return
+    }
+
+    state.nextPartOffset = nextPartOffset
+    state.nextMessageOffset = 0
+    if (state.messages.length === state.limit) {
+        state.sealed = true
+    }
+}
+
+function userTextFromImported(message: RunnerImportedSessionMessage): string | null {
+    if (message.message.role !== 'user') return null
+    const content = asRecord(message.message.content)
+    return content?.type === 'text' && typeof content.text === 'string' && content.text.trim()
+        ? content.text
+        : null
+}
+
+function updateLastUserMessage(
+    current: string | null,
+    messages: RunnerImportedSessionMessage[]
+): string | null {
+    let next = current
     for (const message of messages) {
-        if (message.message.role !== 'user') continue
-        const content = asRecord(message.message.content)
-        if (content?.type === 'text' && typeof content.text === 'string' && content.text.trim()) {
-            lastUserMessage = truncateForSummary(content.text, 200)
+        const text = userTextFromImported(message)
+        if (text) next = truncateForSummary(text, 200)
+    }
+    return next
+}
+
+function buildLoadedSessionFromScan(options: {
+    candidate: OpencodeSessionCandidate
+    source: StorageSource
+    byteSize: number
+    totalMessages: number
+    totalParts?: number
+    messageFileCount?: number
+    lastUserMessage: string | null
+    summaryOverride?: RunnerImportableSessionSummary
+}): OpencodeLoadedSession | null {
+    if (options.totalMessages === 0) return null
+
+    const baseSummary: RunnerImportableSessionSummary = options.summaryOverride ?? {
+        id: options.candidate.id,
+        flavor: 'opencode',
+        title: titleFromParts(options.candidate.cwd, options.candidate.id, options.lastUserMessage),
+        cwd: options.candidate.cwd,
+        lastUserMessage: options.lastUserMessage,
+        modifiedAt: options.candidate.modifiedAt,
+        messageCount: options.totalMessages,
+        byteSize: options.byteSize
+    }
+
+    return {
+        summary: {
+            ...baseSummary,
+            messageCount: options.totalMessages,
+            byteSize: options.byteSize
+        },
+        source: options.source,
+        totalMessages: options.totalMessages,
+        totalParts: options.totalParts,
+        messageFileCount: options.messageFileCount
+    }
+}
+
+function finalizeScanResult(
+    loaded: OpencodeLoadedSession,
+    state: PageCollectState | null
+): OpencodeDatabasePageResult {
+    if (!state) {
+        return {
+            loaded,
+            messages: [],
+            nextPartOffset: 0,
+            nextMessageOffset: 0,
+            done: true
         }
     }
 
-    const summary: RunnerImportableSessionSummary = {
-        id: candidate.id,
-        flavor: 'opencode',
-        title: titleFromParts(candidate.cwd, candidate.id, lastUserMessage),
-        cwd: candidate.cwd,
-        lastUserMessage,
-        modifiedAt: candidate.modifiedAt,
-        messageCount: messages.length,
-        byteSize
+    return {
+        loaded,
+        messages: state.messages,
+        nextPartOffset: state.nextPartOffset,
+        nextMessageOffset: state.nextMessageOffset,
+        done: state.nextPartOffset >= (loaded.totalParts ?? 0) && state.nextMessageOffset === 0
     }
-    return { summary, messages, source: candidate.source }
 }
 
-async function loadDatabaseSession(candidate: OpencodeSessionCandidate): Promise<OpencodeLoadedSession | null> {
+function databasePartToImported(
+    candidate: OpencodeSessionCandidate,
+    row: DbPartWithMessageRow
+): RunnerImportedSessionMessage[] {
+    const part = parseJsonRecord(row.data)
+    if (!part) return []
+
+    const messageInfo = parseJsonRecord(row.message_data ?? '') ?? {}
+    const role = getString(messageInfo.role)
+    const partId = getString(part.id) ?? row.id
+    const messageId = getString(part.messageID) ?? getString(part.messageId) ?? row.message_id
+
+    return convertPart({
+        sessionId: candidate.id,
+        source: 'database',
+        messageId,
+        role,
+        partId,
+        part: { ...part, id: partId, messageID: messageId, sessionID: row.session_id },
+        createdAt: partTimestamp(part, Math.max(0, Math.floor(
+            row.time_created
+            ?? row.message_time_created
+            ?? row.message_time_updated
+            ?? candidate.modifiedAt
+        )))
+    })
+}
+
+async function scanDatabaseSession(
+    candidate: OpencodeSessionCandidate,
+    options?: OpencodeScanOptions
+): Promise<OpencodeDatabasePageResult | null> {
     const db = await openDatabase()
     if (!db) return null
     try {
@@ -567,56 +806,105 @@ async function loadDatabaseSession(candidate: OpencodeSessionCandidate): Promise
         `).get(candidate.id) as DbSessionRow | null
         if (!sessionRow) return null
 
-        const messages = db.prepare(`
-            SELECT id, session_id, time_created, time_updated, data
-            FROM message
-            WHERE session_id = ?
-            ORDER BY time_created ASC, id ASC
-        `).all(candidate.id) as DbMessageRow[]
-        const parts = db.prepare(`
-            SELECT id, message_id, session_id, time_created, time_updated, data
-            FROM part
-            WHERE session_id = ?
-            ORDER BY time_created ASC, id ASC
-        `).all(candidate.id) as DbPartRow[]
-
-        const roles = new Map<string, string>()
-        const messageCreatedAt = new Map<string, number>()
-        for (const row of messages) {
-            const info = parseJsonRecord(row.data) ?? {}
-            const role = getString(info.role)
-            if (role) roles.set(row.id, role)
-            messageCreatedAt.set(row.id, Math.max(0, Math.floor(row.time_created ?? row.time_updated ?? candidate.modifiedAt)))
-        }
-
-        const imported: RunnerImportedSessionMessage[] = []
-        for (const row of parts) {
-            const part = parseJsonRecord(row.data)
-            if (!part) continue
-            const partId = getString(part.id) ?? row.id
-            const messageId = getString(part.messageID) ?? getString(part.messageId) ?? row.message_id
-            imported.push(...convertPart({
-                sessionId: candidate.id,
-                source: 'database',
-                messageId,
-                role: roles.get(messageId) ?? null,
-                partId,
-                part: { ...part, id: partId, messageID: messageId, sessionID: row.session_id },
-                createdAt: partTimestamp(part, Math.max(0, Math.floor(row.time_created ?? messageCreatedAt.get(messageId) ?? candidate.modifiedAt)))
-            }))
-        }
-
-        return buildLoadedSession({
+        const scanCandidate: OpencodeSessionCandidate = {
             ...candidate,
             cwd: sessionRow.directory ?? candidate.cwd,
             modifiedAt: Math.max(0, Math.floor(sessionRow.time_updated ?? candidate.modifiedAt))
-        }, imported, await databaseByteSize())
+        }
+        const byteSize = options?.summaryOverride?.byteSize ?? await databaseByteSize()
+        const state = options ? makePageCollectState(options) : null
+
+        const countRow = db.prepare('SELECT COUNT(*) AS count FROM part WHERE session_id = ?').get(candidate.id) as { count: number } | undefined
+        const actualTotalParts = Math.max(0, Math.floor(countRow?.count ?? 0))
+        if (options?.knownTotalParts !== undefined && actualTotalParts !== options.knownTotalParts) {
+            throw new Error('OpenCode session changed; refresh and retry')
+        }
+
+        let totalMessages = options?.knownTotalMessages ?? 0
+        let lastUserMessage = options?.summaryOverride?.lastUserMessage ?? null
+        let partOffset = options?.summaryOverride ? options.startPartOffset : 0
+
+        const rows = db.prepare(`
+            SELECT
+                part.id,
+                part.message_id,
+                part.session_id,
+                part.time_created,
+                part.time_updated,
+                part.data,
+                message.data AS message_data,
+                message.time_created AS message_time_created,
+                message.time_updated AS message_time_updated
+            FROM part
+            LEFT JOIN message
+                ON message.id = part.message_id
+                AND message.session_id = part.session_id
+            WHERE part.session_id = ?
+            ORDER BY part.time_created ASC, part.id ASC
+            LIMIT -1 OFFSET ?
+        `)
+
+        for (const rawRow of rows.iterate(candidate.id, partOffset)) {
+            if (state?.sealed && options?.summaryOverride) break
+            const row = rawRow as DbPartWithMessageRow
+            const currentPartOffset = partOffset
+            partOffset += 1
+
+            const imported = databasePartToImported(scanCandidate, row)
+            if (options?.knownTotalMessages === undefined) totalMessages += imported.length
+            if (!options?.summaryOverride) {
+                lastUserMessage = updateLastUserMessage(lastUserMessage, imported)
+            }
+
+            if (state) {
+                if (!state.sealed) {
+                    if (imported.length === 0) {
+                        state.nextPartOffset = currentPartOffset + 1
+                        state.nextMessageOffset = 0
+                    }
+                    const startMessageOffset = currentPartOffset === state.nextPartOffset
+                        ? state.nextMessageOffset
+                        : 0
+                    if (startMessageOffset > imported.length) {
+                        throw new Error('OpenCode session changed; refresh and retry')
+                    }
+                    appendMessagesToPage(
+                        state,
+                        imported.slice(startMessageOffset),
+                        currentPartOffset + 1,
+                        startMessageOffset
+                    )
+                }
+                if (
+                    state.sealed
+                    && options?.summaryOverride
+                ) {
+                    break
+                }
+            }
+        }
+
+        const loaded = buildLoadedSessionFromScan({
+            candidate: scanCandidate,
+            source: 'database',
+            byteSize,
+            totalMessages,
+            totalParts: actualTotalParts,
+            lastUserMessage,
+            summaryOverride: options?.summaryOverride
+        })
+        return loaded ? finalizeScanResult(loaded, state) : null
     } catch (error) {
         logger.debug('[RUNNER IMPORT] Failed to load OpenCode database session', { sessionId: candidate.id, error })
+        if (options) throw error
         return null
     } finally {
         db.close()
     }
+}
+
+async function loadDatabaseSession(candidate: OpencodeSessionCandidate): Promise<OpencodeLoadedSession | null> {
+    return (await scanDatabaseSession(candidate))?.loaded ?? null
 }
 
 async function findSessionInfoCandidate(sessionId: string): Promise<OpencodeSessionCandidate | null> {
@@ -624,56 +912,238 @@ async function findSessionInfoCandidate(sessionId: string): Promise<OpencodeSess
     return candidates.find((candidate) => candidate.id === sessionId) ?? null
 }
 
-async function loadFileSession(candidate: OpencodeSessionCandidate): Promise<OpencodeLoadedSession | null> {
-    const messageDir = join(opencodeStorageDir(), 'message', candidate.id)
-    const messageFiles = await listJsonFiles(messageDir)
-    const roles = new Map<string, string>()
-    const messageCreatedAt = new Map<string, number>()
-    let byteSize = candidate.byteSize
+function fileMessageDir(sessionId: string): string {
+    return join(opencodeStorageDir(), 'message', sessionId)
+}
 
-    for (const filePath of messageFiles) {
-        const stats = await readMtimeAndSize(filePath)
-        if (stats) byteSize += stats.size
-        const info = await readJsonRecord(filePath)
-        const messageId = getString(info?.id) ?? filenameToId(filePath)
-        if (!messageId) continue
-        const role = getString(info?.role)
-        if (role) roles.set(messageId, role)
-        const time = asRecord(info?.time)
-        messageCreatedAt.set(messageId, Math.max(0, Math.floor(time ? getNumber(time.created) ?? stats?.mtime ?? candidate.modifiedAt : stats?.mtime ?? candidate.modifiedAt)))
+async function listFileMessagePaths(sessionId: string): Promise<string[]> {
+    return await listJsonFiles(fileMessageDir(sessionId))
+}
+
+async function readFileMessageMetadata(
+    filePath: string,
+    candidate: OpencodeSessionCandidate
+): Promise<{
+    id: string | null
+    role: string | null
+    createdAt: number
+    byteSize: number
+}> {
+    const stats = await readMtimeAndSize(filePath)
+    const info = await readJsonRecord(filePath)
+    const time = asRecord(info?.time)
+    return {
+        id: getString(info?.id) ?? filenameToId(filePath),
+        role: getString(info?.role),
+        createdAt: Math.max(0, Math.floor(time ? getNumber(time.created) ?? stats?.mtime ?? candidate.modifiedAt : stats?.mtime ?? candidate.modifiedAt)),
+        byteSize: stats?.size ?? 0
     }
+}
 
-    const imported: RunnerImportedSessionMessage[] = []
+async function listPartFilesForMessageId(messageId: string): Promise<string[]> {
+    return await listJsonFiles(join(opencodeStorageDir(), 'part', messageId))
+}
+
+async function loadSortedPartRecords(
+    partFiles: string[],
+    candidate: OpencodeSessionCandidate,
+    includeSize: boolean
+): Promise<{ parts: Array<{ filePath: string; part: Record<string, unknown> | null; stats: { mtime: number; size: number } | null }>; byteSize: number }> {
+    const parts: Array<{ filePath: string; part: Record<string, unknown> | null; stats: { mtime: number; size: number } | null }> = []
+    let byteSize = 0
+    for (const partPath of partFiles) {
+        const part = await readJsonRecord(partPath)
+        const stats = await readMtimeAndSize(partPath)
+        if (includeSize && stats) byteSize += stats.size
+        parts.push({ filePath: partPath, part, stats })
+    }
+    parts.sort((a, b) => {
+        const left = a.part ? partTimestamp(a.part, a.stats?.mtime ?? candidate.modifiedAt) : (a.stats?.mtime ?? candidate.modifiedAt)
+        const right = b.part ? partTimestamp(b.part, b.stats?.mtime ?? candidate.modifiedAt) : (b.stats?.mtime ?? candidate.modifiedAt)
+        return left - right
+    })
+    return { parts, byteSize }
+}
+
+async function loadFileSession(candidate: OpencodeSessionCandidate): Promise<OpencodeLoadedSession | null> {
+    const messageFiles = await listFileMessagePaths(candidate.id)
+    let byteSize = candidate.byteSize
+    let totalMessages = 0
+    let lastUserMessage: string | null = null
+
     for (const filePath of messageFiles) {
-        const messageId = filenameToId(filePath)
+        const metadata = await readFileMessageMetadata(filePath, candidate)
+        byteSize += metadata.byteSize
+        const messageId = metadata.id
         if (!messageId) continue
-        const partDir = join(opencodeStorageDir(), 'part', messageId)
-        const partFiles = await listJsonFiles(partDir)
-        const parts: Array<{ filePath: string; part: Record<string, unknown>; stats: { mtime: number; size: number } | null }> = []
-        for (const partPath of partFiles) {
-            const part = await readJsonRecord(partPath)
-            if (!part) continue
-            const stats = await readMtimeAndSize(partPath)
-            if (stats) byteSize += stats.size
-            parts.push({ filePath: partPath, part, stats })
-        }
-        parts.sort((a, b) => partTimestamp(a.part, a.stats?.mtime ?? candidate.modifiedAt) - partTimestamp(b.part, b.stats?.mtime ?? candidate.modifiedAt))
+
+        const partFiles = await listPartFilesForMessageId(messageId)
+        const { parts, byteSize: partByteSize } = await loadSortedPartRecords(partFiles, candidate, true)
+        byteSize += partByteSize
+
         for (const item of parts) {
+            if (!item.part) continue
+
             const partId = getString(item.part.id) ?? filenameToId(item.filePath) ?? hashForKey(item.filePath)
             const partMessageId = getString(item.part.messageID) ?? getString(item.part.messageId) ?? messageId
-            imported.push(...convertPart({
+            const imported = convertPart({
                 sessionId: candidate.id,
                 source: 'files',
                 messageId: partMessageId,
-                role: roles.get(partMessageId) ?? null,
+                role: metadata.role,
                 partId,
                 part: { ...item.part, id: partId, messageID: partMessageId, sessionID: candidate.id },
-                createdAt: partTimestamp(item.part, item.stats?.mtime ?? messageCreatedAt.get(partMessageId) ?? candidate.modifiedAt)
-            }))
+                createdAt: partTimestamp(item.part, item.stats?.mtime ?? metadata.createdAt)
+            })
+
+            totalMessages += imported.length
+            lastUserMessage = updateLastUserMessage(lastUserMessage, imported)
         }
     }
 
-    return buildLoadedSession(candidate, imported, byteSize)
+    return buildLoadedSessionFromScan({
+        candidate,
+        source: 'files',
+        byteSize,
+        totalMessages,
+        messageFileCount: messageFiles.length,
+        lastUserMessage,
+        summaryOverride: undefined
+    })
+}
+
+async function scanFileSessionPage(
+    candidate: OpencodeSessionCandidate,
+    options: OpencodeFilePageOptions
+): Promise<OpencodeFilePageResult | null> {
+    const messageFiles = await listFileMessagePaths(candidate.id)
+    if (options.knownMessageFileCount !== undefined && messageFiles.length !== options.knownMessageFileCount) {
+        throw new Error('OpenCode session changed; refresh and retry')
+    }
+
+    const pageMessages: RunnerImportedSessionMessage[] = []
+    let byteSize = options.summaryOverride?.byteSize ?? candidate.byteSize
+    let totalMessages = options.knownTotalMessages ?? 0
+    let lastUserMessage = options.summaryOverride?.lastUserMessage ?? null
+    let nextMessageIndex = options.nextMessageIndex
+    let nextPartIndex = options.nextPartIndex
+    let nextPartMessageOffset = options.nextPartMessageOffset
+    let sealed = false
+
+    outer:
+    for (let messageIndex = 0; messageIndex < messageFiles.length; messageIndex += 1) {
+        if (options.summaryOverride && messageIndex < options.nextMessageIndex) {
+            continue
+        }
+
+        const metadata = await readFileMessageMetadata(messageFiles[messageIndex], candidate)
+        if (!options.summaryOverride) byteSize += metadata.byteSize
+        const messageId = metadata.id
+        if (!messageId) {
+            if (!sealed && messageIndex >= options.nextMessageIndex) {
+                nextMessageIndex = messageIndex + 1
+                nextPartIndex = 0
+                nextPartMessageOffset = 0
+            }
+            continue
+        }
+
+        const partFiles = await listPartFilesForMessageId(messageId)
+        const startPartIndex = options.summaryOverride && messageIndex === options.nextMessageIndex
+            ? options.nextPartIndex
+            : 0
+        if (startPartIndex > partFiles.length) {
+            throw new Error('OpenCode session changed; refresh and retry')
+        }
+
+        const { parts, byteSize: partByteSize } = await loadSortedPartRecords(partFiles, candidate, !options.summaryOverride)
+        if (!options.summaryOverride) byteSize += partByteSize
+
+        for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+            if (partIndex < startPartIndex) continue
+
+            const item = parts[partIndex]
+            let imported: RunnerImportedSessionMessage[] = []
+            if (item.part) {
+                const partId = getString(item.part.id) ?? filenameToId(item.filePath) ?? hashForKey(item.filePath)
+                const partMessageId = getString(item.part.messageID) ?? getString(item.part.messageId) ?? messageId
+                imported = convertPart({
+                    sessionId: candidate.id,
+                    source: 'files',
+                    messageId: partMessageId,
+                    role: metadata.role,
+                    partId,
+                    part: { ...item.part, id: partId, messageID: partMessageId, sessionID: candidate.id },
+                    createdAt: partTimestamp(item.part, item.stats?.mtime ?? metadata.createdAt)
+                })
+            }
+
+            if (options.knownTotalMessages === undefined) totalMessages += imported.length
+            if (!options.summaryOverride) {
+                lastUserMessage = updateLastUserMessage(lastUserMessage, imported)
+            }
+
+            if (!sealed) {
+                const startMessageOffset = messageIndex === options.nextMessageIndex && partIndex === options.nextPartIndex
+                    ? options.nextPartMessageOffset
+                    : 0
+                if (startMessageOffset > imported.length) {
+                    throw new Error('OpenCode session changed; refresh and retry')
+                }
+                const pageImported = imported.slice(startMessageOffset)
+                const remaining = options.limit - pageMessages.length
+                pageMessages.push(...pageImported.slice(0, remaining))
+
+                if (pageImported.length > remaining) {
+                    nextMessageIndex = messageIndex
+                    nextPartIndex = partIndex
+                    nextPartMessageOffset = startMessageOffset + remaining
+                    sealed = true
+                } else if (partIndex + 1 < parts.length) {
+                    nextMessageIndex = messageIndex
+                    nextPartIndex = partIndex + 1
+                    nextPartMessageOffset = 0
+                } else {
+                    nextMessageIndex = messageIndex + 1
+                    nextPartIndex = 0
+                    nextPartMessageOffset = 0
+                }
+                if (pageMessages.length >= options.limit) {
+                    sealed = true
+                }
+            }
+
+            if (sealed && options.summaryOverride) {
+                break outer
+            }
+        }
+
+        if (!sealed && messageIndex >= options.nextMessageIndex) {
+            nextMessageIndex = messageIndex + 1
+            nextPartIndex = 0
+            nextPartMessageOffset = 0
+        }
+    }
+
+    const loaded = buildLoadedSessionFromScan({
+        candidate,
+        source: 'files',
+        byteSize,
+        totalMessages,
+        messageFileCount: messageFiles.length,
+        lastUserMessage,
+        summaryOverride: options.summaryOverride
+    })
+    if (!loaded) return null
+
+    return {
+        loaded,
+        messages: pageMessages,
+        nextMessageIndex,
+        nextPartIndex,
+        nextPartMessageOffset,
+        done: nextMessageIndex >= messageFiles.length
+    }
 }
 
 async function loadOpencodeSession(candidate: OpencodeSessionCandidate): Promise<OpencodeLoadedSession | null> {
@@ -683,21 +1153,56 @@ async function loadOpencodeSession(candidate: OpencodeSessionCandidate): Promise
     return await loadFileSession(candidate)
 }
 
-async function findOpencodeSessionForImport(sessionId: string, source?: StorageSource): Promise<OpencodeLoadedSession | null> {
+async function findOpencodeCandidateForImport(sessionId: string, source?: StorageSource): Promise<OpencodeSessionCandidate | null> {
     if (!source || source === 'database') {
         const dbCandidate = (await listDatabaseSessionCandidates()).find((candidate) => candidate.id === sessionId)
-        if (dbCandidate) {
-            const loaded = await loadDatabaseSession(dbCandidate)
-            if (loaded) return loaded
-        }
+        if (dbCandidate) return dbCandidate
     }
 
     if (!source || source === 'files') {
-        const fileCandidate = await findSessionInfoCandidate(sessionId)
-        if (fileCandidate) return await loadFileSession(fileCandidate)
+        return await findSessionInfoCandidate(sessionId)
     }
 
     return null
+}
+
+async function getDatabaseOpencodeSessionPage(
+    candidate: OpencodeSessionCandidate,
+    options: OpencodeScanOptions
+): Promise<RunnerImportedSessionPage> {
+    const scan = await scanDatabaseSession(candidate, options)
+    if (!scan) {
+        throw new Error('OpenCode session not found on runner')
+    }
+    return {
+        ...scan.loaded.summary,
+        totalMessages: scan.loaded.totalMessages,
+        messages: scan.messages,
+        nextCursor: scan.done ? null : databaseCursorFromLoaded(scan.loaded, scan.nextPartOffset, scan.nextMessageOffset),
+        done: scan.done
+    }
+}
+
+async function getFileOpencodeSessionPage(
+    candidate: OpencodeSessionCandidate,
+    options: OpencodeFilePageOptions
+): Promise<RunnerImportedSessionPage> {
+    const scan = await scanFileSessionPage(candidate, options)
+    if (!scan) {
+        throw new Error('OpenCode session not found on runner')
+    }
+    return {
+        ...scan.loaded.summary,
+        totalMessages: scan.loaded.totalMessages,
+        messages: scan.messages,
+        nextCursor: scan.done ? null : fileCursorFromLoaded(
+            scan.loaded,
+            scan.nextMessageIndex,
+            scan.nextPartIndex,
+            scan.nextPartMessageOffset
+        ),
+        done: scan.done
+    }
 }
 
 export async function listOpencodeImportableSessions(
@@ -717,44 +1222,77 @@ export async function listOpencodeImportableSessions(
 
 export async function getOpencodeSessionImportPage(
     request: RunnerImportSessionPageRequest,
-    _options: OpencodeImportOptions = {}
+    options: OpencodeImportOptions = {}
 ): Promise<RunnerImportedSessionPage> {
     const limit = request.limit ?? DEFAULT_PAGE_LIMIT
-    let loaded: OpencodeLoadedSession | null
-    let afterSourceKey: string | null = null
 
     if (request.cursor) {
         const cursor = decodeCursor(request.cursor)
         if (!cursor || cursor.sessionId !== request.sessionId) {
             throw new Error('Invalid import cursor')
         }
-        loaded = await findOpencodeSessionForImport(cursor.sessionId, cursor.source)
-        afterSourceKey = cursor.afterSourceKey
-    } else {
-        loaded = await findOpencodeSessionForImport(request.sessionId)
+        const candidate = await findOpencodeCandidateForImport(cursor.sessionId, cursor.source)
+        if (!candidate) {
+            throw new Error('OpenCode session not found on runner')
+        }
+
+        const summaryOverride: RunnerImportableSessionSummary = {
+            id: cursor.sessionId,
+            flavor: 'opencode',
+            title: cursor.title,
+            cwd: cursor.cwd,
+            lastUserMessage: cursor.lastUserMessage,
+            modifiedAt: cursor.modifiedAt,
+            messageCount: cursor.totalMessages,
+            byteSize: cursor.byteSize
+        }
+
+        if (cursor.source === 'database') {
+            return await getDatabaseOpencodeSessionPage(candidate, {
+                limit,
+                startPartOffset: cursor.nextPartOffset,
+                startMessageOffset: cursor.nextMessageOffset,
+                knownTotalMessages: cursor.totalMessages,
+                knownTotalParts: cursor.totalParts,
+                summaryOverride
+            })
+        }
+
+        return await getFileOpencodeSessionPage(candidate, {
+            limit,
+            nextMessageIndex: cursor.nextMessageIndex,
+            nextPartIndex: cursor.nextPartIndex,
+            nextPartMessageOffset: cursor.nextPartMessageOffset,
+            knownTotalMessages: cursor.totalMessages,
+            knownMessageFileCount: cursor.messageFileCount,
+            summaryOverride
+        })
     }
 
-    if (!loaded) {
+    const candidate = await findOpencodeCandidateForImport(request.sessionId)
+    if (!candidate) {
         throw new Error('OpenCode session not found on runner')
     }
+    const cachedSummary = options.summary?.id === request.sessionId && options.summary.flavor === 'opencode'
+        ? options.summary
+        : undefined
 
-    let startIndex = 0
-    if (afterSourceKey) {
-        const index = loaded.messages.findIndex((message) => message.sourceKey === afterSourceKey)
-        if (index < 0) throw new Error('OpenCode session changed; refresh and retry')
-        startIndex = index + 1
+    if (candidate.source === 'database') {
+        return await getDatabaseOpencodeSessionPage(candidate, {
+            limit,
+            startPartOffset: 0,
+            startMessageOffset: 0,
+            knownTotalMessages: cachedSummary?.messageCount,
+            summaryOverride: cachedSummary
+        })
     }
 
-    const messages = loaded.messages.slice(startIndex, startIndex + limit)
-    const nextIndex = startIndex + messages.length
-    const done = nextIndex >= loaded.messages.length
-    const nextAfterSourceKey = messages.length > 0 ? messages[messages.length - 1].sourceKey : afterSourceKey
-
-    return {
-        ...loaded.summary,
-        totalMessages: loaded.messages.length,
-        messages,
-        nextCursor: done ? null : cursorFromLoaded(loaded, nextAfterSourceKey),
-        done
-    }
+    return await getFileOpencodeSessionPage(candidate, {
+        limit,
+        nextMessageIndex: 0,
+        nextPartIndex: 0,
+        nextPartMessageOffset: 0,
+        knownTotalMessages: cachedSummary?.messageCount,
+        summaryOverride: cachedSummary
+    })
 }
